@@ -19,7 +19,18 @@ action_map = {
     2: "LEFT",
     3: "RIGHT",
     4: "SPEED",
-    5: "BREAK"
+    5: "BREAK",
+    6: "UP+SPEED",
+    7: "DOWN+BREAK",
+    8: "RIGHT+SPEED",
+    9: "LEFT+SPEED",
+    10: "RIGHT+BREAK",
+    11: "LEFT+BREAK",
+    12: "UP+RIGHT",
+    13: "UP+LEFT",
+    14: "DOWN+RIGHT",
+    15: "DOWN+LEFT",
+    16: "HOLD"
 }
 
 def train_and_plot(obs_dim=5, action_dim=6, learning_rate=0.001, gamma=0.95, buffer_capacity=100000, batch_size=128, total_steps=100000, target_update_interval=500, train_freq=4, epsilon_decay=0.5):

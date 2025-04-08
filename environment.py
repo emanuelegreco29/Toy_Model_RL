@@ -98,6 +98,39 @@ class PointMassEnv(gym.Env):
             v = min(v + self.delta_v, self.v_max)
         elif action == 5:    # Frenare
             v = max(v - self.delta_v, 0.0)
+        elif action == 6:    # Salire e Accelerare
+            z += self.delta_z
+            v = min(v + self.delta_v, self.v_max)
+        elif action == 7:    # Scendere e Frenare
+            z -= self.delta_z
+            v = max(v - self.delta_v, 0.0)
+        elif action == 8:    # Girare a destra e Accelerare
+            theta += self.delta_theta
+            v = min(v + self.delta_v, self.v_max)
+        elif action == 9:    # Girare a sinistra e Accelerare
+            theta -= self.delta_theta
+            v = min(v + self.delta_v, self.v_max)
+        elif action == 10:   # Girare a destra e Frenare
+            theta += self.delta_theta
+            v = max(v - self.delta_v, 0.0)
+        elif action == 11:   # Girare a sinistra e Frenare
+            theta -= self.delta_theta
+            v = max(v - self.delta_v, 0.0)
+        elif action == 12:   # Salire e Girare a destra
+            z += self.delta_z
+            theta += self.delta_theta
+        elif action == 13:   # Salire e Girare a sinistra
+            z += self.delta_z
+            theta -= self.delta_theta
+        elif action == 14:   # Scendere e Girare a destra
+            z -= self.delta_z
+            theta += self.delta_theta
+        elif action == 15:   # Scendere e Girare a sinistra
+            z -= self.delta_z
+            theta -= self.delta_theta
+        elif action == 16:   # Mantieni
+            pass
+        
 
         # Aggiornamento posizione
         x += v * np.cos(theta) * self.dt
