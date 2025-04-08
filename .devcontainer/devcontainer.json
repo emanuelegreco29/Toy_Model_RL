@@ -1,0 +1,20 @@
+{
+    "name": "Toy_Model_RL",
+    "dockerFile": "Dockerfile",
+    "workspaceFolder": "/workspaces/Toy_Model_RL",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+				"python.languageServer": "Pylance",
+                "python.venvPath": "${workspaceFolder}/.venvs",
+            }
+        }
+    },
+    "remoteUser": "vscode",
+}
