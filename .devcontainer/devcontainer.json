@@ -17,4 +17,5 @@
         }
     },
     "remoteUser": "vscode",
+    "postCreateCommand": "pdm install"
 }
