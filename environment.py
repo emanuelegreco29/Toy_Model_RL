@@ -9,18 +9,11 @@ class PointMassEnv(gym.Env):
       - (x, y, z): posizione
       - v: velocità scalare
       - theta: orientamento nel piano xy (radianti)
-    Azioni:
-      0: Salire (incrementa z)
-      1: Scendere (decrementa z)
-      2: Girare a destra (incrementa theta)
-      3: Girare a sinistra (decrementa theta)
-      4: Accelerare (incrementa v)
-      5: Frenare (diminuisce v)
     """
     def __init__(self, render_mode=None):
         super(PointMassEnv, self).__init__()
         self.render_mode = render_mode
-        self.action_space = spaces.Discrete(6)
+        self.action_space = spaces.Discrete(9)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
         self.dt = 0.1
         self.max_steps = 1000
@@ -32,7 +25,7 @@ class PointMassEnv(gym.Env):
         self.delta_v = 0.25      # incremento velocità
         self.delta_theta = 0.25  # incremento angolo
         self.delta_z = 0.25      # incremento quota
-        self.v_max = 5.0       # velocità massima
+        # self.v_max = 5.0       # velocità massima
 
         # Target fisso
         self.target = np.array([10.0, 10.0, 5.0])
@@ -59,7 +52,6 @@ class PointMassEnv(gym.Env):
 
     def compute_reward(self, prev_state, current_state, target):
         # Estrai le posizioni 3D dagli stati
-        
         prev_pos = prev_state[:3]
         curr_pos = current_state[:3]
  
@@ -69,7 +61,10 @@ class PointMassEnv(gym.Env):
  
         # Reward per il progresso: premio proporzionale alla riduzione della distanza
         improvement = prev_distance - curr_distance
-        reward = max(improvement * 10.0, 0.0)  + 1/curr_distance
+        reward = max(improvement * 10.0, 0.0)
+        
+        if(curr_distance < 0.5):
+            reward += 500
 
         return reward
 
@@ -94,41 +89,19 @@ class PointMassEnv(gym.Env):
             theta += self.delta_theta
         elif action == 3:    # Girare a sinistra
             theta -= self.delta_theta
-        elif action == 4:    # Accelerare
-            v = min(v + self.delta_v, self.v_max)
-        elif action == 5:    # Frenare
-            v = max(v - self.delta_v, 0.0)
-        elif action == 6:    # Salire e Accelerare
-            z += self.delta_z
-            v = min(v + self.delta_v, self.v_max)
-        elif action == 7:    # Scendere e Frenare
-            z -= self.delta_z
-            v = max(v - self.delta_v, 0.0)
-        elif action == 8:    # Girare a destra e Accelerare
-            theta += self.delta_theta
-            v = min(v + self.delta_v, self.v_max)
-        elif action == 9:    # Girare a sinistra e Accelerare
-            theta -= self.delta_theta
-            v = min(v + self.delta_v, self.v_max)
-        elif action == 10:   # Girare a destra e Frenare
-            theta += self.delta_theta
-            v = max(v - self.delta_v, 0.0)
-        elif action == 11:   # Girare a sinistra e Frenare
-            theta -= self.delta_theta
-            v = max(v - self.delta_v, 0.0)
-        elif action == 12:   # Salire e Girare a destra
+        elif action == 4:   # Salire e Girare a destra
             z += self.delta_z
             theta += self.delta_theta
-        elif action == 13:   # Salire e Girare a sinistra
+        elif action == 5:   # Salire e Girare a sinistra
             z += self.delta_z
             theta -= self.delta_theta
-        elif action == 14:   # Scendere e Girare a destra
+        elif action == 6:   # Scendere e Girare a destra
             z -= self.delta_z
             theta += self.delta_theta
-        elif action == 15:   # Scendere e Girare a sinistra
+        elif action == 7:   # Scendere e Girare a sinistra
             z -= self.delta_z
             theta -= self.delta_theta
-        elif action == 16:   # Mantieni
+        elif action == 8:   # Mantieni
             pass
         
 
@@ -149,6 +122,7 @@ class PointMassEnv(gym.Env):
                 #print("EARLY STOP!!!")
         if current_distance < 0.5:
             terminated = True
+            print("Target raggiunto!")
         elif self.current_step >= self.max_steps:
             truncated = True
 

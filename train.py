@@ -18,19 +18,11 @@ action_map = {
     1: "DOWN",
     2: "LEFT",
     3: "RIGHT",
-    4: "SPEED",
-    5: "BREAK",
-    6: "UP+SPEED",
-    7: "DOWN+BREAK",
-    8: "RIGHT+SPEED",
-    9: "LEFT+SPEED",
-    10: "RIGHT+BREAK",
-    11: "LEFT+BREAK",
-    12: "UP+RIGHT",
-    13: "UP+LEFT",
-    14: "DOWN+RIGHT",
-    15: "DOWN+LEFT",
-    16: "HOLD"
+    4: "UP+RIGHT",
+    5: "UP+LEFT",
+    6: "DOWN+RIGHT",
+    7: "DOWN+LEFT",
+    8: "HOLD"
 }
 
 def train_and_plot(obs_dim=5, action_dim=6, learning_rate=0.001, gamma=0.95, buffer_capacity=100000, batch_size=128, total_steps=100000, target_update_interval=500, train_freq=4, epsilon_decay=0.5):
@@ -261,14 +253,14 @@ def train_and_plot(obs_dim=5, action_dim=6, learning_rate=0.001, gamma=0.95, buf
 
 # Parametri della rete
 obs_dim = 5
-action_dim = 6
+action_dim = 9
 learning_rate = 0.0005
 gamma = 0.95
 buffer_capacity = 100000
 batch_size = 128
-total_steps = 500000
+total_steps = 150000
 target_update_interval = 1000
-epsilon_decay = 0.85
+epsilon_decay = 0.7
 
 model, env, rewards_log, distances_log = train_and_plot(
     obs_dim=obs_dim,

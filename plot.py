@@ -79,7 +79,7 @@ def plot_episode(file_path, target, select=None):
     target = np.array(target)
     distances = np.linalg.norm(states[:, :3] - target, axis=1)
 
-    # --- Grafico 3D della traiettoria ---
+    # Grafico 3D della traiettoria
     fig = plt.figure(figsize=(14, 6))
     ax1 = fig.add_subplot(121, projection='3d')
     
@@ -105,18 +105,18 @@ def plot_episode(file_path, target, select=None):
     ax1.set_zlabel("Z")
     ax1.legend()
 
-    # --- Grafico dei trend: Distanza e Reward vs Step ---
+    # Grafico di Distanza e Reward nel tempo 
     ax2 = fig.add_subplot(222)
     ax2.plot(step_numbers, distances, marker='o', label='Distanza', color='magenta')
     ax2.set_xlabel("Step")
     ax2.set_ylabel("Distanza dal Target")
-    ax2.set_title("Distanza vs Step")
+    ax2.set_title("Distanza nel tempo")
     
     ax3 = fig.add_subplot(224)
     ax3.plot(step_numbers, rewards, marker='o', label='Reward', color='orange')
     ax3.set_xlabel("Step")
     ax3.set_ylabel("Reward")
-    ax3.set_title("Reward vs Step")
+    ax3.set_title("Reward nel tempo")
     
     plt.tight_layout()
     plt.show()
@@ -125,10 +125,10 @@ def plot_episode(file_path, target, select=None):
 # TODO: Permetti inserimento da CLI del nome file e di quali episodi ottenere i plot
 if __name__ == "__main__":
     file_dir = "logs"
-    file_name = "training_log_2025-04-07_14-00-21.txt" # INSERIRE QUI NOME FILE PRIMA DI ESEGUIRE
+    file_name = "training_log_2025-04-08_16-25-15.txt" # INSERIRE QUI NOME FILE PRIMA DI ESEGUIRE
     file_path = os.path.join(file_dir, file_name)
     target = [10.0, 10.0, 5.0]
     plot_episode(file_path, target)
     plot_episode(file_path, target)
-    plot_episode(file_path, target, select=250)
-    plot_episode(file_path, target, select=450)
+    plot_episode(file_path, target, select=75)
+    plot_episode(file_path, target, select=140)
