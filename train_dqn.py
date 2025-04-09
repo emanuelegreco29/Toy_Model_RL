@@ -11,7 +11,7 @@ import matplotlib.cm as cm
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from environment import PointMassEnv
-from network import QNetwork, ReplayBuffer, huber_loss
+from dqn_network import QNetwork, ReplayBuffer, huber_loss
 
 action_map = {
     0: "UP",

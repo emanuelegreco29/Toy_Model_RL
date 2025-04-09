@@ -14,7 +14,7 @@ class PointMassEnv(gym.Env):
         super(PointMassEnv, self).__init__()
         self.render_mode = render_mode
         self.action_space = spaces.Discrete(9)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
         self.dt = 0.1
         self.max_steps = 1000
         self.current_step = 0
@@ -48,23 +48,44 @@ class PointMassEnv(gym.Env):
         self.current_step = 0
         self.state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
         self.last_distance = np.linalg.norm(self.state[:3] - self.target)
-        return self.state.copy(), {}
+        return self.full_state(), {}
+    
+    def full_state(self):
+        return np.concatenate([self.state, self.target])
 
     def compute_reward(self, prev_state, current_state, target):
-        # Estrai le posizioni 3D dagli stati
+        # Estrai le posizioni 3D
         prev_pos = prev_state[:3]
         curr_pos = current_state[:3]
- 
-        # Calcola le distanze dal target
+        
         prev_distance = np.linalg.norm(prev_pos - target)
         curr_distance = np.linalg.norm(curr_pos - target)
- 
-        # Reward per il progresso: premio proporzionale alla riduzione della distanza
-        improvement = prev_distance - curr_distance
-        reward = max(improvement * 10.0, 0.0)
         
-        if(curr_distance < 0.5):
-            reward += 500
+        # Calcola il progresso
+        improvement = prev_distance - curr_distance
+        if improvement >= 0:
+            reward_progress = 10.0 * improvement
+        else:
+            reward_progress = 15.0 * improvement  # Penalità più forte se si allontana
+        
+        # Penalità per ogni step per incentivare la rapidità
+        time_penalty = 0.5
+        reward = reward_progress - time_penalty
+
+        # Calcola la penalità per l'allineamento angolare:
+        # - current_theta è l'orientamento attuale dell'agente (in radianti)
+        current_theta = current_state[4]
+        # - Calcola l'angolo ideale da curr_pos a target
+        desired_theta = np.arctan2(target[1] - curr_pos[1], target[0] - curr_pos[0])
+        # Normalizza la differenza angolare nell'intervallo [-pi, pi]
+        theta_diff = np.abs((current_theta - desired_theta + np.pi) % (2 * np.pi) - np.pi)
+        # Penalizza proporzionalmente all'errore angolare (sperimenta con il coefficiente, qui 20)
+        angle_penalty = 5.0 * theta_diff
+        reward -= angle_penalty
+
+        # Bonus se il target viene raggiunto (ad esempio, distanza < 0.5)
+        if curr_distance < 0.5:
+            reward += 100.0
 
         return reward
 
@@ -116,18 +137,13 @@ class PointMassEnv(gym.Env):
 
         terminated = False
         truncated = False
-        #if self.current_step > 200:
-            #if current_distance > self.last_distance + 2.0:
-                #truncated = True
-                #print("EARLY STOP!!!")
         if current_distance < 0.5:
             terminated = True
-            print("Target raggiunto!")
         elif self.current_step >= self.max_steps:
             truncated = True
 
         self.last_distance = current_distance
-        return self.state.copy(), reward, terminated, truncated, {}
+        return self.full_state(), reward, terminated, truncated, {}
 
     def render(self, mode='human'):
         if self.render_mode == "human":
