@@ -57,33 +57,26 @@ class PointMassEnv(gym.Env):
         # Estrai le posizioni 3D
         prev_pos = prev_state[:3]
         curr_pos = current_state[:3]
-        
+
+        # Calcola le distanze dal target
         prev_distance = np.linalg.norm(prev_pos - target)
         curr_distance = np.linalg.norm(curr_pos - target)
-        
+
         # Calcola il progresso
         improvement = prev_distance - curr_distance
+        reward = 0
+
+        # Se ci si avvicina, reward positivo
         if improvement >= 0:
-            reward_progress = 10.0 * improvement
-        else:
-            reward_progress = 15.0 * improvement  # Penalità più forte se si allontana
-        
-        # Penalità per ogni step per incentivare la rapidità
-        time_penalty = 0.5
-        reward = reward_progress - time_penalty
+            reward += 10.0 * improvement
 
-        # Calcola la penalità per l'allineamento angolare:
-        # - current_theta è l'orientamento attuale dell'agente (in radianti)
-        current_theta = current_state[4]
-        # - Calcola l'angolo ideale da curr_pos a target
-        desired_theta = np.arctan2(target[1] - curr_pos[1], target[0] - curr_pos[0])
-        # Normalizza la differenza angolare nell'intervallo [-pi, pi]
-        theta_diff = np.abs((current_theta - desired_theta + np.pi) % (2 * np.pi) - np.pi)
-        # Penalizza proporzionalmente all'errore angolare (sperimenta con il coefficiente, qui 20)
-        angle_penalty = 5.0 * theta_diff
-        reward -= angle_penalty
+        # Bonus avvicinamento
+        if curr_distance < 2.0:
+            reward += 50.0
+        elif curr_distance < 5.0:
+            reward += 25.0
 
-        # Bonus se il target viene raggiunto (ad esempio, distanza < 0.5)
+        # Bonus se il target viene raggiunto
         if curr_distance < 0.5:
             reward += 100.0
 
