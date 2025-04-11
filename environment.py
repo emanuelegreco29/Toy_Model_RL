@@ -71,9 +71,9 @@ class PointMassEnv(gym.Env):
             reward += 10.0 * improvement
 
         # Bonus avvicinamento
-        if curr_distance < 2.0:
+        if curr_distance < 2.0 and improvement > 0:
             reward += 50.0
-        elif curr_distance < 5.0:
+        elif curr_distance < 5.0 and improvement > 0:
             reward += 25.0
 
         # Bonus se il target viene raggiunto

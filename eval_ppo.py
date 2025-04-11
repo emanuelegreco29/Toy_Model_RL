@@ -103,7 +103,7 @@ def run_plot(env, model):
 
 
 model_dir = "models"
-model_name = "ppo_agent_20250409-140528.pth"  # INSERIRE NOME FILE PRIMA DI ESEGUIRE
+model_name = "ppo_agent_20250409-155709.pth"  # INSERIRE NOME FILE PRIMA DI ESEGUIRE
 model_path = os.path.join(model_dir, model_name)
 # Inizializza il modello PPO
 model = ActorCritic(input_dim=8, num_actions=9)
