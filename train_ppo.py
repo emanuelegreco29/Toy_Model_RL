@@ -32,7 +32,8 @@ def collect_trajectories(env, actor_critic, device, rollout_length):
     """
     storage = []
     state, _ = env.reset()
-    for t in range(rollout_length):
+    steps_collected = 0
+    while steps_collected < rollout_length:
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         logits, value = actor_critic(state_tensor)
         # Crea una distribuzione categorica per le azioni
@@ -49,8 +50,11 @@ def collect_trajectories(env, actor_critic, device, rollout_length):
             'log_prob': log_prob.item(),
             'value': value.item()
         })
+        steps_collected += 1
         state = next_state
         if done:
+            if terminated:
+                print("Target reached!")
             state, _ = env.reset()
     return storage
 
@@ -244,8 +248,8 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
 input_dim = 8
 num_actions = 9
 total_iterations = 500
-rollout_length = 100
-ppo_epochs = 10
+rollout_length = 200
+ppo_epochs = 15
 mini_batch_size = 64
 clip_param = 0.2
 

@@ -64,21 +64,25 @@ class PointMassEnv(gym.Env):
 
         # Calcola il progresso
         improvement = prev_distance - curr_distance
-        reward = 0
+        reward = 10.0 * improvement
 
-        # Se ci si avvicina, reward positivo
-        if improvement >= 0:
-            reward += 10.0 * improvement
+        # Do reward di vicinanza solo se agent si sta avvicinando
+        if improvement > 0:
+            if curr_distance < 2.0:
+                reward += 50.0
+            if curr_distance < 0.5:
+                reward += 100.0
 
-        # Bonus avvicinamento
-        if curr_distance < 2.0 and improvement > 0:
-            reward += 50.0
-        elif curr_distance < 5.0 and improvement > 0:
-            reward += 25.0
-
-        # Bonus se il target viene raggiunto
-        if curr_distance < 0.5:
-            reward += 100.0
+        # Calcola l'angolo desiderato dalla posizione corrente al target
+        desired_heading = np.arctan2(target[1] - curr_pos[1], target[0] - curr_pos[0])
+        current_heading = current_state[4]  # theta corrente
+        # Calcola la differenza normalizzata nell'intervallo [0, pi]
+        heading_diff = abs((current_heading - desired_heading + np.pi) % (2 * np.pi) - np.pi)
+        # Definiamo il reward per il corretto allineamento
+        reward += 20.0 * (1 - heading_diff / np.pi)
+        
+        # Penalità per ogni step per incentivare la rapidità
+        reward -= 1.0
 
         return reward
 
