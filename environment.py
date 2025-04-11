@@ -54,35 +54,19 @@ class PointMassEnv(gym.Env):
         return np.concatenate([self.state, self.target])
 
     def compute_reward(self, prev_state, current_state, target):
-        # Estrai le posizioni 3D
-        prev_pos = prev_state[:3]
+        # Estrai la posizione corrente (x, y, z)
         curr_pos = current_state[:3]
-
-        # Calcola le distanze dal target
-        prev_distance = np.linalg.norm(prev_pos - target)
-        curr_distance = np.linalg.norm(curr_pos - target)
-
-        # Calcola il progresso
-        improvement = prev_distance - curr_distance
-        reward = 10.0 * improvement
-
-        # Do reward di vicinanza solo se agent si sta avvicinando
-        if improvement > 0:
-            if curr_distance < 2.0:
-                reward += 50.0
-            if curr_distance < 0.5:
-                reward += 100.0
-
-        # Calcola l'angolo desiderato dalla posizione corrente al target
-        desired_heading = np.arctan2(target[1] - curr_pos[1], target[0] - curr_pos[0])
-        current_heading = current_state[4]  # theta corrente
-        # Calcola la differenza normalizzata nell'intervallo [0, pi]
-        heading_diff = abs((current_heading - desired_heading + np.pi) % (2 * np.pi) - np.pi)
-        # Definiamo il reward per il corretto allineamento
-        reward += 20.0 * (1 - heading_diff / np.pi)
         
-        # Penalità per ogni step per incentivare la rapidità
-        reward -= 1.0
+        # Calcola la distanza dal target
+        curr_distance = np.linalg.norm(curr_pos - target)
+        
+        # Reward: penalizziamo ogni step in base alla distanza attuale,
+        # quindi più sei lontano, più il reward è negativo.
+        reward = -curr_distance
+        
+        # Bonus: se il target viene raggiunto (distanza inferiore a 0.5), aggiungi un bonus positivo
+        if curr_distance < 0.5:
+            reward += 100.0
 
         return reward
 

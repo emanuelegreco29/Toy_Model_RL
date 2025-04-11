@@ -8,12 +8,18 @@ class ActorCritic(nn.Module):
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
             nn.ReLU()
         )
         # Fornisce in output i logits (valori grezzi non normalizzati) per le 9 azioni discrete
-        self.policy_head = nn.Linear(512, num_actions)
+        self.policy_head = nn.Linear(128, num_actions)
         # Stima il valore dello stato
-        self.value_head = nn.Linear(512, 1)
+        self.value_head = nn.Linear(128, 1)
         
     def forward(self, x):
         shared = self.shared_net(x)

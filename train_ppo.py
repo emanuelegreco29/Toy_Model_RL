@@ -248,8 +248,8 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
 input_dim = 8
 num_actions = 9
 total_iterations = 500
-rollout_length = 200
-ppo_epochs = 15
+rollout_length = 100
+ppo_epochs = 10
 mini_batch_size = 64
 clip_param = 0.2
 
