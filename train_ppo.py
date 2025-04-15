@@ -124,12 +124,16 @@ def update_policy(actor_critic, optimizer, states, actions, old_log_probs, retur
             loss = policy_loss + value_coeff * value_loss + entropy_coeff * entropy_loss
             optimizer.zero_grad()
             loss.backward()
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(actor_critic.parameters(), max_norm=0.5)
+
             optimizer.step()
             total_loss += loss.item()
     return total_loss
 
 def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_length=2048, ppo_epochs=10, mini_batch_size=64, 
-                       gamma=0.95, learning_rate=0.0005, clip_param=0.2):
+                       gamma=0.95, learning_rate=0.0005, clip_param=0.2, entropy_coeff=0.01):
     """
     Addestra un agente PPO e ne plotta i risultati.
     
@@ -169,7 +173,7 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
     
     # Inizializza il modello actor-critic
     actor_critic = ActorCritic(input_dim=input_dim, num_actions=num_actions).to(device)
-    optimizer = optim.Adam(actor_critic.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(actor_critic.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     episode_rewards = []
     episode_final_distances = []
@@ -246,12 +250,14 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
 
 # Parametri della rete
 input_dim = 8
-num_actions = 9
+num_actions = 5
 total_iterations = 500
-rollout_length = 100
-ppo_epochs = 10
+rollout_length = 500
+ppo_epochs = 20
 mini_batch_size = 64
-clip_param = 0.2
+learning_rate = 0.0005
+entropy_coeff = 0.01
+clip_param = 0.1
 
 actor_critic, env, rewards_log, distances_log = train_and_plot(input_dim=input_dim,
                                                                num_actions=num_actions,
@@ -259,4 +265,6 @@ actor_critic, env, rewards_log, distances_log = train_and_plot(input_dim=input_d
                                                                rollout_length=rollout_length,
                                                                ppo_epochs=ppo_epochs,
                                                                mini_batch_size=mini_batch_size,
+                                                               learning_rate=learning_rate,
+                                                               entropy_coeff=entropy_coeff,
                                                                clip_param=clip_param)

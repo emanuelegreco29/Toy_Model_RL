@@ -11,11 +11,11 @@ action_map = {
     1: "DOWN",
     2: "LEFT",
     3: "RIGHT",
-    4: "UP+RIGHT",
+    8: "UP+RIGHT",
     5: "UP+LEFT",
     6: "DOWN+RIGHT",
     7: "DOWN+LEFT",
-    8: "HOLD"
+    4: "HOLD"
 }
 
 def evaluate_agent(model, env, n_episodes=10):
@@ -103,7 +103,7 @@ def run_plot(env, model):
 
 
 model_dir = "models"
-model_name = "ppo_agent_20250411-154127.pth"  # INSERIRE NOME FILE PRIMA DI ESEGUIRE
+model_name = "ppo_agent_20250414-170310.pth"  # INSERIRE NOME FILE PRIMA DI ESEGUIRE
 model_path = os.path.join(model_dir, model_name)
 # Inizializza il modello PPO
 model = ActorCritic(input_dim=8, num_actions=9)

@@ -7,14 +7,18 @@ class ActorCritic(nn.Module):
             nn.Linear(input_dim, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(512, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(256, 128),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(0.2)
         )
         # Fornisce in output i logits (valori grezzi non normalizzati) per le 9 azioni discrete
         self.policy_head = nn.Linear(128, num_actions)
