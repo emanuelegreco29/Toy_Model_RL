@@ -5,7 +5,7 @@ import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
-from gymnasium.wrappers import RecordEpisodeStatistics
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
 from environment import PointMassEnv
 from ppo_network import ActorCritic
@@ -31,31 +31,37 @@ def collect_trajectories(env, actor_critic, device, rollout_length):
         Lista di dizionari contenenti informazioni per ogni step
     """
     storage = []
-    state, _ = env.reset()
+    obs = env.reset()
+    state = obs[0]
     steps_collected = 0
     while steps_collected < rollout_length:
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
-        logits, value = actor_critic(state_tensor)
+        mean, std, value = actor_critic(state_tensor)
         # Crea una distribuzione categorica per le azioni
-        dist = torch.distributions.Categorical(logits=logits)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
-        next_state, reward, terminated, truncated, _ = env.step(action.item())
-        done = terminated or truncated
+        dist = torch.distributions.Normal(mean, std)
+        action_tensor = dist.rsample()                        # reparameterization trick
+        log_prob = dist.log_prob(action_tensor).sum(dim=-1).item()   # somma sui tre parametri
+        action = action_tensor.detach().cpu().numpy().flatten()        # array di 3 float
+        next_obs, rewards, dones, infos = env.step(action.reshape(1, -1))
+        next_state = next_obs[0]
+        reward = rewards[0]
+        done = bool(dones[0])
+
         storage.append({
             'state': state,
-            'action': action.item(),
+            'next_state': next_state,
+            'action': action,
             'reward': reward,
             'done': done,
-            'log_prob': log_prob.item(),
+            'log_prob': log_prob,
             'value': value.item()
         })
         steps_collected += 1
         state = next_state
         if done:
-            if terminated:
-                print("Target reached!")
-            state, _ = env.reset()
+            obs, _ = env.reset()
+            state = obs[0]
+            
     return storage
 
 def compute_ret_adv(storage, gamma):
@@ -88,6 +94,32 @@ def compute_ret_adv(storage, gamma):
         advantages.insert(0, cumulative_return - step['value'])
     return returns, advantages
 
+def compute_gae(storage, actor_critic, device, gamma=0.99, lam=0.95):
+    """
+    Calcola Returns e Advantage con Generalized Advantage Estimation (GAE).
+    storage: lista di dict con 'reward', 'value', 'done', e 'state'.
+    """
+    # Estrai i valori V(s_t)
+    values = [step['value'] for step in storage]
+    # calcola V(s_{T+1}) sull'ultimo stato non ancora in storage
+    last_state = torch.tensor(storage[-1]['next_state'], dtype=torch.float32).unsqueeze(0).to(device)
+    with torch.no_grad():
+        _, _, last_value = actor_critic(last_state)
+    values.append(last_value.item())
+
+    advantages = []
+    gae = 0.0
+    # backward pass
+    for t in reversed(range(len(storage))):
+        mask = 0.0 if storage[t]['done'] else 1.0
+        delta = storage[t]['reward'] + gamma * values[t+1] * mask - values[t]
+        gae = delta + gamma * lam * mask * gae
+        advantages.insert(0, gae)
+
+    # returns = advantage + value
+    returns = [adv + v for adv, v in zip(advantages, values[:-1])]
+    return returns, advantages
+
 # Aggiornamento del modello tramite la PPO-clip
 def update_policy(actor_critic, optimizer, states, actions, old_log_probs, returns, advantages,
                   clip_param=0.2, value_coeff=0.5, entropy_coeff=0.01, ppo_epochs=10, mini_batch_size=64):
@@ -106,9 +138,9 @@ def update_policy(actor_critic, optimizer, states, actions, old_log_probs, retur
     for _ in range(ppo_epochs):
         for batch in loader:
             state, action, old_lp, returns, advantages = batch
-            logits, value = actor_critic(state)
-            dist = torch.distributions.Categorical(logits=logits)
-            new_log_probs = dist.log_prob(action)
+            mean, std, value = actor_critic(state)
+            dist = torch.distributions.Normal(mean, std)
+            new_log_probs = dist.log_prob(action).sum(dim=-1)
             ratio = torch.exp(new_log_probs - old_lp)
 
             # PPO Loss: MIN tra il termine base e quello clippato
@@ -132,7 +164,7 @@ def update_policy(actor_critic, optimizer, states, actions, old_log_probs, retur
             total_loss += loss.item()
     return total_loss
 
-def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_length=2048, ppo_epochs=10, mini_batch_size=64, 
+def train_and_plot(input_dim=8, num_actions=3, total_iterations=100, rollout_length=2048, ppo_epochs=10, mini_batch_size=64, 
                        gamma=0.95, learning_rate=0.0005, clip_param=0.2, entropy_coeff=0.01):
     """
     Addestra un agente PPO e ne plotta i risultati.
@@ -166,8 +198,9 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
         La lista delle distanze finali dal target per episodio.
     """
     # Inizializza l'ambiente e registra le statistiche degli episodi
-    env = PointMassEnv(render_mode="human")
-    env = RecordEpisodeStatistics(env)
+    # VectorEnv + normalization
+    venv = DummyVecEnv([lambda: PointMassEnv()])
+    env  = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -182,11 +215,13 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
     for iteration in range(total_iterations):
         # Raccogli un rollout
         storage = collect_trajectories(env, actor_critic, device, rollout_length)
-        returns, advantages = compute_ret_adv(storage, gamma)
+        returns, advantages = compute_gae(storage, actor_critic, device, gamma=0.99, lam=0.95)
         
         # Converti i dati raccolti in tensori
-        states = torch.tensor(np.array([step['state'] for step in storage]), dtype=torch.float32).to(device)
-        actions = torch.tensor([step['action'] for step in storage], dtype=torch.long).to(device)
+        states_np = np.array([step['state'] for step in storage], dtype=np.float32)
+        states = torch.tensor(states_np, dtype=torch.float32).to(device)
+        actions_np = np.array([step['action'] for step in storage], dtype=np.float32)
+        actions = torch.tensor(actions_np, dtype=torch.float32).to(device)
         old_log_probs = torch.tensor([step['log_prob'] for step in storage], dtype=torch.float32).to(device)
         returns_tensor = torch.tensor(returns, dtype=torch.float32).to(device)
         advantages_tensor = torch.tensor(advantages, dtype=torch.float32).to(device)
@@ -198,18 +233,19 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
         all_losses.append(loss)
         
         # Per il monitoraggio, esegui un episodio di test in modalità greedy
-        state, _ = env.reset()
-        episode_reward = 0.0
+        raw_env = env.venv.envs[0]
+        raw_state, _ = raw_env.reset()
         done = False
+        episode_reward = 0.0
         while not done:
-            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
-            logits, value = actor_critic(state_tensor)
-            action = torch.argmax(logits, dim=1).item()
-            next_state, reward, terminated, truncated, _ = env.step(action)
+            norm_state = env.normalize_obs(raw_state)
+            with torch.no_grad():
+                mean, std, _ = actor_critic(torch.tensor(norm_state, dtype=torch.float32).unsqueeze(0).to(device))
+            action = mean.squeeze(0).cpu().numpy()
+            raw_state, reward, terminated, truncated, info = raw_env.step(action)
             episode_reward += reward
-            state = next_state
-            done = terminated or truncated
-        final_distance = np.linalg.norm(state[:3] - env.unwrapped.target)
+            done = bool(terminated or truncated)
+        final_distance = np.linalg.norm(raw_state[:3] - raw_env.target)
         episode_rewards.append(episode_reward)
         episode_final_distances.append(final_distance)
         
@@ -249,15 +285,15 @@ def train_and_plot(input_dim=8, num_actions=9, total_iterations=100, rollout_len
     return actor_critic, env, episode_rewards, episode_final_distances
 
 # Parametri della rete
-input_dim = 8
-num_actions = 5
+input_dim = 11
+num_actions = 3
 total_iterations = 500
-rollout_length = 500
+rollout_length = 128
 ppo_epochs = 20
-mini_batch_size = 64
-learning_rate = 0.0005
-entropy_coeff = 0.01
-clip_param = 0.1
+mini_batch_size = 32
+learning_rate = 0.0001
+entropy_coeff = 0.02
+clip_param = 0.2
 
 actor_critic, env, rewards_log, distances_log = train_and_plot(input_dim=input_dim,
                                                                num_actions=num_actions,
