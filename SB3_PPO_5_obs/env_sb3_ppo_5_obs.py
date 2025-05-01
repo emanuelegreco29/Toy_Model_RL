@@ -17,22 +17,19 @@ class PointMassEnv(gym.Env):
         self.current_step = 0
 
         # Parametri di variazione e limiti
-        self.delta_v = 0.25
         self.delta_theta = 0.5
         self.delta_z = 0.25
-        self.v_max = 2.0
 
         # Action space continuo: [Δv, Δθ, Δz]
-        low  = np.array([-self.delta_v, -self.delta_theta, -self.delta_z], dtype=np.float32)
-        high = np.array([ self.delta_v,  self.delta_theta,  self.delta_z], dtype=np.float32)
+        low  = np.array([-self.delta_theta, -self.delta_z], dtype=np.float32)
+        high = np.array([ self.delta_theta,  self.delta_z], dtype=np.float32)
         self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-        # Osservazione: stato + target + dir_to_target (3)
-        # [x, y, z, v, θ, x_t, y_t, z_t, dx, dy, dz]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
+        # Osservazione: stato relativo [dx, dy, dz, v, theta]
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
 
         # Stato iniziale: [x, y, z, v, θ]
-        self.state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        self.initial_state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
 
         # Target fisso
         self.target = np.array([10.0, 10.0, 5.0], dtype=np.float32)
@@ -43,15 +40,14 @@ class PointMassEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         self.current_step = 0
-        self.state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        self.state = self.initial_state.copy()
         return self._get_obs(), {}
     
     def _get_obs(self):
-        pos = self.state[:3]
-        vec = self.target - pos
-        dist = np.linalg.norm(vec)
-        dir_to = vec/dist if dist>1e-8 else np.zeros(3, dtype=np.float32)
-        return np.concatenate([self.state, self.target, dir_to])
+        # Calcola lo stato relativo: differenza posizione-target
+        delta = self.target - self.state[:3]
+        v, theta = self.state[3], self.state[4]
+        return np.concatenate([delta, [v, theta]).astype(np.float32)
 
     def compute_reward(self, prev_state, current_state, target):
         curr_pos = current_state[:3]
@@ -60,27 +56,16 @@ class PointMassEnv(gym.Env):
         prev_distance = np.linalg.norm(prev_pos - target)
         improvement = prev_distance - curr_distance
         
-        if improvement >= 0:
-            reward = 10.0 * improvement
-        else:
-            reward = - 5.0 * abs(improvement)
-        
-        reward -= 0.01
-
- 
-        # Bonus se il target viene raggiunto (ad esempio, distanza < 0.5)
-        if curr_distance < 0.5:
-            reward += 100.0
+        reward = -curr_distance  # Penalizza la distanza dal target
  
         return reward
 
     def step(self, action):
         x, y, z, v, theta = self.state
 
-        # action = [Δv, Δθ, Δz]
-        dv, dtheta, dz = action
-        v = np.clip(v + dv, 0.0, self.v_max)
-        theta = theta + dtheta
+        # action = [Δθ, Δz]
+        dtheta, dz = action
+        theta = (theta + dtheta + np.pi) % (2 * np.pi) - np.pi  # normalizzato in [-π,π]
         z = z + dz
 
         x = x + v * np.cos(theta) * self.dt
@@ -92,14 +77,14 @@ class PointMassEnv(gym.Env):
 
         reward = self.compute_reward(prev_state, self.state, self.target)
 
-        terminated = False
-        truncated = False
-        if np.linalg.norm(self.state[:3] - self.target) < 0.5:
-            terminated = True
-        elif self.current_step >= self.max_steps:
-            truncated = True
+        terminated = np.linalg.norm(self.state[:3] - self.target) < 0.5
+        truncated = self.current_step >= self.max_steps
+        distance = np.linalg.norm(self.state[:3] - self.target)
+        info = {
+            "distance": distance,
+        }
 
-        return self._get_obs(), reward, terminated, truncated, {}
+        return self._get_obs(), reward, terminated, truncated, info
 
     def render(self, mode='human'):
         if self.render_mode == "human":
