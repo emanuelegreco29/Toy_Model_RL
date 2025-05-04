@@ -2,207 +2,154 @@ import os
 import datetime
 import numpy as np
 import torch
-import torch.optim as optim
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, TensorDataset
+import torch.nn as nn
+import torch.nn.functional as F
 
-from environment import PointMassEnv
-from ppo_network import ActorCritic
+from env_PPO import PointMassEnv
+from ppo_network import PPO
 
-def collect_trajectories(env, actor_critic, device, rollout_length, gamma):
+def compute_gae(rewards, values, last_value, gamma=0.99, lam=0.95):
     """
-    Esegue un rollout per `rollout_length` passi e ritorna arrays:
-    states, actions, old_log_probs, returns, advantages
+    Compute generalized advantage estimation (GAE).
+    Args:
+        rewards:   np.array, shape [T]
+        values:    np.array, shape [T]
+        last_value: float, bootstrap value for last state
+        gamma:     discount factor
+        lam:       GAE lambda
+    Returns:
+        advantages: np.array, shape [T]
+        returns:    np.array, shape [T]
     """
-    obs, _ = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32, device=device)
+    T = len(rewards)
+    values = np.append(values, last_value)
+    advantages = np.zeros(T, dtype=np.float32)
+    gae = 0.0
+    for t in reversed(range(T)):
+        delta = rewards[t] + gamma * values[t+1] - values[t]
+        gae = delta + gamma * lam * gae
+        advantages[t] = gae
+    returns = advantages + values[:-1]
+    return advantages, returns
 
-    states, actions, old_log_probs, rewards, dones, values = [], [], [], [], [], []
-    action_dim = env.action_space.shape[0]
-    low  = torch.tensor(env.action_space.low, dtype=torch.float32, device=device).unsqueeze(0)
-    high = torch.tensor(env.action_space.high, dtype=torch.float32, device=device).unsqueeze(0)
 
-    for _ in range(rollout_length):
-        mean, std, value = actor_critic(obs.unsqueeze(0))
-        dist = torch.distributions.Normal(mean, std)
-        action = dist.sample()
-        action_clamped = torch.clamp(action, min=low, max=high)
-        action_np = action_clamped.squeeze(0).cpu().numpy()
-        log_prob = dist.log_prob(action).sum(dim=-1)
+def ppo_update(policy, optimizer, obs_buf, act_buf, logp_old_buf, ret_buf, adv_buf,
+               clip_eps=0.2, update_epochs=10, batch_size=64):
+    """
+    Perform PPO-clip update.
+    """
+    # normalize advantages
+    adv_buf = (adv_buf - adv_buf.mean()) / (adv_buf.std() + 1e-8)
+    data_size = len(obs_buf)
+    for _ in range(update_epochs):
+        idxs = np.random.permutation(data_size)
+        for start in range(0, data_size, batch_size):
+            end = start + batch_size
+            batch_idx = idxs[start:end]
 
-        next_obs, reward, terminated, truncated, _ = env.step(action_np)
-        done = terminated or truncated
+            obs_batch = torch.as_tensor(obs_buf[batch_idx], dtype=torch.float32)
+            act_batch = torch.as_tensor(act_buf[batch_idx], dtype=torch.float32)
+            old_logp_batch = torch.as_tensor(logp_old_buf[batch_idx], dtype=torch.float32)
+            ret_batch = torch.as_tensor(ret_buf[batch_idx], dtype=torch.float32)
+            adv_batch = torch.as_tensor(adv_buf[batch_idx], dtype=torch.float32)
 
-        states.append(obs.cpu().numpy())
-        actions.append(action.cpu().numpy())
-        old_log_probs.append(log_prob.cpu().detach().numpy())
-        rewards.append(reward)
-        dones.append(done)
-        values.append(value.cpu().detach().numpy().squeeze())
+            dist, value = policy(obs_batch)
+            logp = dist.log_prob(act_batch)
+            ratio = torch.exp(logp - old_logp_batch)
 
-        obs = torch.tensor(next_obs, dtype=torch.float32, device=device)
-        if done:
-            obs, _ = env.reset()
-            obs = torch.tensor(obs, dtype=torch.float32, device=device)
+            # policy loss
+            clip_adv = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv_batch
+            loss_pi = -(torch.min(ratio * adv_batch, clip_adv)).mean()
 
-    # bootstrap dal valore dell'ultima osservazione
-    _, _, last_value = actor_critic(obs.unsqueeze(0))
-    last_value = last_value.cpu().detach().numpy().squeeze()
+            # value loss
+            loss_v = F.mse_loss(value, ret_batch)
 
-    # calcola returns e advantage
-    returns = []
-    G = last_value
-    for r, done in zip(reversed(rewards), reversed(dones)):
-        if done:
-            G = 0.0
-        G = r + gamma * G
-        returns.insert(0, G)
-    returns = np.array(returns)
-    values = np.array(values)
-    advantages = returns - values
+            # entropy bonus
+            entropy = dist.entropy().mean()
 
-    return (
-        np.array(states),
-        np.array(actions),
-        np.array(old_log_probs),
-        returns,
-        advantages
-    )
+            # total loss
+            loss = loss_pi + 0.5 * loss_v - 0.01 * entropy
 
-def train_and_plot(input_dim, num_actions, total_iterations, rollout_length, ppo_epochs, mini_batch_size, learning_rate, entropy_coeff, clip_param):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = PointMassEnv()
-    actor_critic = ActorCritic(input_dim=input_dim, num_actions=num_actions).to(device)
-    optimizer = optim.Adam(actor_critic.parameters(), lr=learning_rate)
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+            optimizer.step()
 
-    episode_rewards = []
-    episode_final_distances = []
-    all_losses = []
 
-    gamma = 0.99
+# --- Training parameters and initialization ---
+steps = 500
+epochs = 500
+gamma = 0.99
+lam = 0.95
+clip_eps = 0.2
+update_epochs = 10
+batch_size = 64
+lr = 3e-4
 
-    for iteration in range(total_iterations):
-        # Raccolta traiettorie
-        states, actions, old_log_probs, returns, advantages = collect_trajectories(
-            env, actor_critic, device, rollout_length, gamma
-        )
-        # normalizza vantaggi
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+# Prepare environment and policy
+env = PointMassEnv()
+obs_dim = env.observation_space.shape[0]
+act_dim = env.action_space.shape[0]
 
-        dataset = TensorDataset(
-            torch.tensor(states, dtype=torch.float32),
-            torch.tensor(actions, dtype=torch.float32),
-            torch.tensor(old_log_probs, dtype=torch.float32),
-            torch.tensor(returns, dtype=torch.float32),
-            torch.tensor(advantages, dtype=torch.float32)
-        )
-        loader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
+policy = PPO(obs_dim=obs_dim, act_dim=act_dim)
+optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 
-        epoch_loss = 0.0
-        for _ in range(ppo_epochs):
-            for b_states, b_actions, b_old_log_probs, b_returns, b_advantages in loader:
-                b_states = b_states.to(device)
-                b_actions = b_actions.to(device)
-                b_old_log_probs = b_old_log_probs.to(device)
-                b_returns = b_returns.to(device)
-                b_advantages = b_advantages.to(device)
+# Directories for saving
+os.makedirs('models', exist_ok=True)
 
-                mean, std, values = actor_critic(b_states)
-                dist = torch.distributions.Normal(mean, std)
-                new_log_probs = dist.log_prob(b_actions).sum(dim=-1)
-                entropy = dist.entropy().sum(dim=-1).mean()
+# Storage buffers
+obs_buf = np.zeros((steps, obs_dim), dtype=np.float32)
+act_buf = np.zeros((steps, act_dim), dtype=np.float32)
+logp_buf = np.zeros(steps, dtype=np.float32)
+val_buf = np.zeros(steps, dtype=np.float32)
+rew_buf = np.zeros(steps, dtype=np.float32)
 
-                ratio = torch.exp(new_log_probs - b_old_log_probs)
-                clipped = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * b_advantages
-                policy_loss = -torch.min(ratio * b_advantages, clipped).mean()
-                value_loss = (b_returns - values.squeeze(-1)).pow(2).mean()
-                loss = policy_loss + 0.5 * value_loss - entropy_coeff * entropy
+global_step = 0
+episode_count = 0
+# Training loop
+for epoch in range(1, epochs + 1):
+    o, _ = env.reset()
+    ep_ret, ep_len = 0.0, 0
+    # Collect experience
+    for t in range(steps):
+        obs_buf[t] = o
+        with torch.no_grad():
+            a, logp, v = policy.get_action(torch.as_tensor(o, dtype=torch.float32))
+        a = a.numpy()
+        logp_buf[t] = logp.numpy()
+        val_buf[t] = v.numpy()
+        act_buf[t] = a
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        o2, r, terminated, truncated, info = env.step(a)
+        rew_buf[t] = r
+        ep_ret += r
+        ep_len += 1
+        global_step += 1
 
-                epoch_loss += loss.item()
+        o = o2
+        timeout = ep_len >= env.max_steps
+        if terminated or truncated or timeout:
+            # Print per-episode log as in train_sb3_ppo_moving
+            episode_count += 1
+            distance = info.get('distance', np.nan)
+            print(f"Episode {episode_count} | Reward: {ep_ret:.2f} | Distance: {distance:.2f}")
+            # Bootstrap value
+            if timeout or truncated:
+                with torch.no_grad():
+                    _, _, v = policy.get_action(torch.as_tensor(o, dtype=torch.float32))
+                last_val = v.numpy()
+            else:
+                last_val = 0.0
+            # Reset episode
+            o, _ = env.reset()
+            ep_ret, ep_len = 0.0, 0
+    # Compute GAE and update
+    adv_buf, ret_buf = compute_gae(rew_buf, val_buf, last_val, gamma, lam)
+    ppo_update(policy, optimizer, obs_buf, act_buf, logp_buf, ret_buf, adv_buf,
+               clip_eps, update_epochs, batch_size)
 
-        avg_loss = epoch_loss / (ppo_epochs * len(loader))
-        all_losses.append(avg_loss)
-
-        # Valutazione episodio per logging
-        obs, _ = env.reset()
-        done = False
-        episode_reward = 0.0
-        while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            with torch.no_grad():
-                mean, _, _ = actor_critic(obs_tensor)
-                action_np = mean.cpu().numpy()[0]
-                action_clamped = np.clip(action_np,
-                                        env.action_space.low,
-                                        env.action_space.high)
-
-            next_obs, reward, terminated, truncated, _ = env.step(action_clamped)
-            done = terminated or truncated
-            episode_reward += reward
-            obs = next_obs
-
-        final_distance = np.linalg.norm(obs[:3] - env.target)
-        episode_rewards.append(episode_reward)
-        episode_final_distances.append(final_distance)
-
-        print(f"Iteration {iteration+1}/{total_iterations} | Reward: {episode_reward:.2f} | Final Distance: {final_distance:.2f}")
-
-    # Plot dei risultati
-    episodes = np.arange(1, len(episode_rewards) + 1)
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-    axs[0].plot(episodes, episode_rewards, marker='o')
-    axs[0].set_xlabel("Episode")
-    axs[0].set_ylabel("Total Reward")
-    axs[0].set_title("Total Reward per Episode")
-    
-    axs[1].plot(episodes, episode_final_distances, marker='o', color='orange')
-    axs[1].set_xlabel("Episode")
-    axs[1].set_ylabel("Final Distance")
-    axs[1].set_title("Final Distance from Target per Episode")
-    plt.tight_layout()
-    plt.show()
-    
-    # Plot dell'andamento della loss
-    plt.figure(figsize=(8,6))
-    plt.plot(all_losses, marker='o')
-    plt.xlabel("Iteration")
-    plt.ylabel("PPO Loss")
-    plt.title("PPO Loss over Iterations")
-    plt.show()
-    
-    # Salva il modello
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    model_dir = "models"
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, f"ppo_agent_{timestamp}.pth")
-    torch.save(actor_critic.state_dict(), model_path)
-    
-    print("\nTraining completed!")
-    return actor_critic, env, episode_rewards, episode_final_distances
-
-# Parametri della rete
-input_dim = 5
-num_actions = 2
-total_iterations = 500
-rollout_length = 500
-ppo_epochs = 10
-mini_batch_size = 64
-learning_rate = 0.0005
-entropy_coeff = 0.02
-clip_param = 0.2
-
-train_and_plot(
-    input_dim=input_dim,
-    num_actions=num_actions,
-    total_iterations=total_iterations,
-    rollout_length=rollout_length,
-    ppo_epochs=ppo_epochs,
-    mini_batch_size=mini_batch_size,
-    learning_rate=learning_rate,
-    entropy_coeff=entropy_coeff,
-    clip_param=clip_param
-)
+# Save final model
+ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+model_path = f'models/ppo_custom_moving_target_{ts}.zip'
+torch.save(policy.state_dict(), model_path)
+print("\nTraining completed!")
