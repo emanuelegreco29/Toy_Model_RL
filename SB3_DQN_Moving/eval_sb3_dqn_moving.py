@@ -1,5 +1,6 @@
 import os
 import glob
+import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -41,7 +42,7 @@ def evaluate_model(model, num_episodes=10):
         target_trajs.append(np.array(target_path))
     return trajectories, target_trajs, rewards, distances
 
-def plot_separate_coordinates(agent_traj, target_traj, title_prefix='Episode', save_dir='plots'):
+def plot_coordinates(agent_traj, target_traj, title_prefix='Episode', save_dir='plots'):
     os.makedirs(save_dir, exist_ok=True)
     coords = ['X', 'Y', 'Z']
     for i, label in enumerate(coords):
@@ -57,13 +58,12 @@ def plot_separate_coordinates(agent_traj, target_traj, title_prefix='Episode', s
         plt.savefig(os.path.join(save_dir, f'{title_prefix}_{label}.png'))
         plt.close()
 
-def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif'):
+def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_dir='plots'):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     agent_line, = ax.plot([], [], [], lw=2, label='Agent')
     target_line, = ax.plot([], [], [], lw=2, linestyle='--', color='red', label='Target')
 
-    # Set dynamic bounds to follow both agent and target trajectories
     all_points = np.vstack((agent_traj, target_traj))
     min_bounds = all_points.min(axis=0)
     max_bounds = all_points.max(axis=0)
@@ -84,12 +84,17 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif'):
         target_line.set_3d_properties(target_traj[:num+1, 2])
         return agent_line, target_line
 
+    os.makedirs(save_dir, exist_ok=True)
+    filepath = os.path.join(save_dir, filename)
     ani = FuncAnimation(fig, update, frames=len(agent_traj), interval=200, blit=False)
-    ani.save(filename, writer=PillowWriter(fps=5))
+    ani.save(filepath, writer=PillowWriter(fps=5))
     plt.close()
 
 # MAIN
 model = load_latest_model()
+timestamp = datetime.datetime.now().strftime('%Y%m%d')
+save_dir = os.path.join('plots', f"sb3_dqn_moving_{timestamp}")
+os.makedirs(save_dir, exist_ok=True)
 num_ep = 100
 trajectories, target_trajs, rewards, distances = evaluate_model(model, num_ep)
 
@@ -101,9 +106,10 @@ print(f"Best Episode {best_idx+1} | Reward: {rewards[best_idx]:.2f} | Distance: 
 print(f"Worst Episode {worst_idx+1} | Reward: {rewards[worst_idx]:.2f} | Distance: {distances[worst_idx]:.2f}")
 
 # Plots x(t), y(t), z(t) for best and worst
-plot_separate_coordinates(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode')
-plot_separate_coordinates(trajectories[worst_idx], target_trajs[worst_idx], title_prefix='Worst_Episode')
+plot_coordinates(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode', save_dir=save_dir)
+plot_coordinates(trajectories[worst_idx], target_trajs[worst_idx], title_prefix='Worst_Episode', save_dir=save_dir)
 
 # Animated trajectory for best and worst
-animate_trajectory(trajectories[best_idx], target_trajs[best_idx], filename='best_episode.gif')
-animate_trajectory(trajectories[worst_idx], target_trajs[worst_idx], filename='worst_episode.gif')
+animate_trajectory(trajectories[best_idx], target_trajs[best_idx], filename='best_episode.gif', save_dir=save_dir)
+animate_trajectory(trajectories[worst_idx], target_trajs[worst_idx], filename='worst_episode.gif', save_dir=save_dir)
+print(f"Plots saved in {save_dir}")
