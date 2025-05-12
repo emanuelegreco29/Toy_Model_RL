@@ -58,19 +58,13 @@ def plot_coordinates(agent_traj, target_traj, title_prefix='Episode', save_dir='
         plt.savefig(os.path.join(save_dir, f'{title_prefix}_{label}.png'))
         plt.close()
 
-def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_dir='plots'):
+def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_dir='plots', pad=1.0):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    agent_line, = ax.plot([], [], [], lw=2, label='Agent')
-    target_line, = ax.plot([], [], [], lw=2, linestyle='--', color='red', label='Target')
 
-    all_points = np.vstack((agent_traj, target_traj))
-    min_bounds = all_points.min(axis=0)
-    max_bounds = all_points.max(axis=0)
-    padding = 0.1 * (max_bounds - min_bounds)
-    ax.set_xlim(min_bounds[0] - padding[0], max_bounds[0] + padding[0])
-    ax.set_ylim(min_bounds[1] - padding[1], max_bounds[1] + padding[1])
-    ax.set_zlim(min_bounds[2] - padding[2], max_bounds[2] + padding[2])
+    # linee colorate e continue
+    agent_line, = ax.plot([], [], [], lw=2, color='blue', label='Agent')
+    target_line, = ax.plot([], [], [], lw=2, linestyle='-', color='orange', label='Target')
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
@@ -78,10 +72,21 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_
     ax.legend()
 
     def update(num):
+        # update trajectories
         agent_line.set_data(agent_traj[:num+1, 0], agent_traj[:num+1, 1])
         agent_line.set_3d_properties(agent_traj[:num+1, 2])
         target_line.set_data(target_traj[:num+1, 0], target_traj[:num+1, 1])
         target_line.set_3d_properties(target_traj[:num+1, 2])
+
+        # Dynamic zoom to center target and agent
+        curr_agent = agent_traj[num]
+        curr_target = target_traj[num]
+        mins = np.minimum(curr_agent, curr_target) - pad
+        maxs = np.maximum(curr_agent, curr_target) + pad
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
+
         return agent_line, target_line
 
     os.makedirs(save_dir, exist_ok=True)
@@ -90,12 +95,14 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_
     ani.save(filepath, writer=PillowWriter(fps=5))
     plt.close()
 
-# MAIN
+
 model = load_latest_model()
+print("Model loaded successfully.")
 timestamp = datetime.datetime.now().strftime('%Y%m%d')
 save_dir = os.path.join('plots', f"sb3_dqn_moving_{timestamp}")
 os.makedirs(save_dir, exist_ok=True)
 num_ep = 100
+print(f"Evaluating model for {num_ep} episodes...")
 trajectories, target_trajs, rewards, distances = evaluate_model(model, num_ep)
 
 print(f"Average reward: {np.mean(rewards):.2f} | Average distance: {np.mean(distances):.2f}")
@@ -106,6 +113,7 @@ print(f"Best Episode {best_idx+1} | Reward: {rewards[best_idx]:.2f} | Distance: 
 print(f"Worst Episode {worst_idx+1} | Reward: {rewards[worst_idx]:.2f} | Distance: {distances[worst_idx]:.2f}")
 
 # Plots x(t), y(t), z(t) for best and worst
+print("Plotting and saving trajectories...")
 plot_coordinates(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode', save_dir=save_dir)
 plot_coordinates(trajectories[worst_idx], target_trajs[worst_idx], title_prefix='Worst_Episode', save_dir=save_dir)
 
