@@ -20,7 +20,7 @@ class PredictiveModel(nn.Module):
     def forward(self, x):
         return self.head(self.feature(x))
 
-def evaluate(model_path, n_trajectories=10000):
+def evaluate(model_path, n_trajectories=100):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -42,6 +42,7 @@ def evaluate(model_path, n_trajectories=10000):
 
     mse_list = []
     mae_list = []
+    mape_list = []
 
     for _ in range(n_trajectories):
         traj = env_PT_rand_traj.generate_bspline_trajectory(bounds, max_step, dt, T=T, K=6)
@@ -64,15 +65,19 @@ def evaluate(model_path, n_trajectories=10000):
         err = preds - next_pos
         mse = np.mean(err**2)
         mae = np.mean(np.abs(err))
+        mape = np.mean(np.abs(err / next_pos)) * 100
         mse_list.append(mse)
         mae_list.append(mae)
+        mape_list.append(mape)
 
     print(f"Evaluated on {n_trajectories} trajectories:")
     print(f"Mean MSE: {np.mean(mse_list):.6f} ± {np.std(mse_list):.6f}")
     print(f"Mean MAE: {np.mean(mae_list):.6f} ± {np.std(mae_list):.6f}")
+    print(f"Mean MAPE: {np.mean(mape_list):.6f}% ± {np.std(mape_list):.6f}%")
 
 
 model_name = "predictive_20250510_161358.pth"
 LOAD_PATH = os.path.join("models", model_name)
+NUM = 10000
 
-evaluate(model_path=LOAD_PATH)
+evaluate(model_path=LOAD_PATH, n_trajectories=NUM)
