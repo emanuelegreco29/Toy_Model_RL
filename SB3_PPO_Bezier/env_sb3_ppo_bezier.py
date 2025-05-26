@@ -36,18 +36,22 @@ class PointMassEnv(gym.Env):
         # Movement parameters
         self.bounds = np.array([[0, 10.0], [0, 10.0], [0, 10.0]], dtype=np.float32)
         self.initial_speed = 1.0
-        self.max_step = self.initial_speed * self.dt
+        self.max_step = 500
+        self.tracking_counter = 0
         # Agent control increments
-        self.delta_theta = 0.5
-        self.delta_z = 0.25
+        self.delta_yaw = 0.4
+        self.delta_v = 0.1
+        self.delta_pitch = 0.4
+        self.v_max = 1.5
+        self.v_min = 0.1
 
         # Action space: change in heading and altitude
-        low_act = np.array([-self.delta_theta, -self.delta_z], dtype=np.float32)
-        high_act = np.array([ self.delta_theta,  self.delta_z], dtype=np.float32)
+        low_act = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
+        high_act = np.array([ self.delta_v, self.delta_yaw,  self.delta_pitch], dtype=np.float32)
         self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
 
-        # Observation: agent state (5) + target history (K+1 states of length 3, just x,y,z)
-        obs_dim = 5 + 3 * (self.K_history + 1)
+        # Observation: agent state (6) + target history (K+1 states of length 3, just x,y,z)
+        obs_dim = 6 + 3 * (self.K_history + 1)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self.reset()
@@ -56,15 +60,16 @@ class PointMassEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         self.current_step = 0
-        # Agent starts at origin, speed=1, heading=0
-        self.state = np.array([0.0, 0.0, 0.0, self.initial_speed, 0.0], dtype=np.float32)
+        self.totally_behind = 0
+        # Agent starts at origin, speed=1, yaw=0, pitch=0
+        self.state = np.array([0.0, 0.0, 0.0, self.initial_speed, 0.0, 0.0], dtype=np.float32)
         # Pre-generate a random B-spline trajectory for the target
         self.target_traj = generate_bspline_trajectory(
             bounds=self.bounds,
             max_step=self.max_step,
             dt=self.dt,
             T=self.max_steps,
-            K=6
+            K=6 # Number of waypoints
         )
         # Initialize target history deque
         self.target_history = deque(maxlen=self.K_history + 1)
@@ -78,6 +83,50 @@ class PointMassEnv(gym.Env):
 
     def _get_obs(self):
         return np.concatenate([self.state] + list(self.target_history)).astype(np.float32)
+    
+    def _is_behind(self):
+        """
+        Determine if the agent is behind the target within a specified cone.
+
+        The function checks if the agent is positioned behind the target,
+        relative to the target's movement direction, within a certain 
+        distance and angular constraints. It calculates the vector from
+        the previous to the current target position to establish the 
+        direction of movement. Then, it checks if the agent is within 
+        a specified distance from the target and projects the agent's 
+        position onto the target's direction vector to determine if 
+        it lies behind the target. Additionally, it verifies if the 
+        perpendicular distance from the agent to the direction vector 
+        is within a specified threshold.
+        """
+        agent_pos = self.state[:3]
+        target_pos = self.target_history[-1]
+        # We can calculate only after second timestep, at least
+        if len(self.target_history) < 2:
+            return False
+        prev_target = self.target_history[-2]
+
+        # Target direction vector
+        dir_vec = target_pos - prev_target
+        if np.linalg.norm(dir_vec) < 1e-6:
+            return False
+        dir_unit = dir_vec / np.linalg.norm(dir_vec)
+
+        # Agent->Target vector
+        vec = agent_pos - target_pos
+        dist = np.linalg.norm(vec)
+        if dist > 1.0:
+            return False
+
+        # Projection along direction
+        proj = np.dot(vec, dir_unit)
+        # Condition to be behind (inside the cone)
+        if not (-1.0 <= proj <= 0.0):
+            return False
+
+        # Check perpendicular distance
+        perp_dist = np.linalg.norm(vec - proj * dir_unit)
+        return perp_dist <= 0.5
 
     def compute_reward(self, prev_agent: np.ndarray, cur_agent: np.ndarray) -> float:
         # Distance improvement towards current target
@@ -89,11 +138,10 @@ class PointMassEnv(gym.Env):
             reward = imp
         else:
             reward = -0.5 * abs(imp)
-        # Small time penalty
-        reward -= 0.001
-        # Bonus for reaching the target
-        if cur_dist < 0.5:
-            reward += 50.0
+
+        # Tracking bonus
+        if(self.tracking_counter > 0):
+            reward += 1.0 * self.tracking_counter
 
         # Predictive bonus
         if len(self.target_history) >= 2:
@@ -105,6 +153,7 @@ class PointMassEnv(gym.Env):
             pred_imp = prev_pred_dist - cur_pred_dist
             # Scale the predictive improvement
             reward += 0.1 * pred_imp
+
         return float(reward)
 
     def step(self, action):
@@ -118,24 +167,42 @@ class PointMassEnv(gym.Env):
         self.target_state = next_target.copy()
 
         # Update agent state given action
-        x, y, z, v, theta = self.state
-        dtheta, dz = action
-        theta = (theta + dtheta + np.pi) % (2 * np.pi) - np.pi
-        z += dz
-        x += v * np.cos(theta) * self.dt
-        y += v * np.sin(theta) * self.dt
-        self.state = np.array([x, y, z, v, theta], dtype=np.float32)
+        x, y, z, v, yaw, pitch = self.state
+        dv, dyaw, dpitch = action
+
+        # Aggiorno velocità e angoli, mantenendoli in range sensato
+        v = np.clip(v + dv, self.v_min, self.v_max)
+        yaw = (yaw + dyaw + np.pi) % (2*np.pi) - np.pi
+        pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
+
+        # Calcolo gli spostamenti
+        dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
+        dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
+        dz = v * np.sin(pitch)               * self.dt
+
+        # Applico i vincoli dei bounds
+        x = x + dx
+        y = y + dy
+        z = z + dz
+
+        # Nuovo stato
+        self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
 
         self.current_step += 1
+
+        if(self._is_behind()):
+            self.tracking_counter += 1
+            self.totally_behind += 1
+        else:
+            self.tracking_counter = 0
         reward = self.compute_reward(prev_agent, self.state)
 
         # Check termination
         dist = np.linalg.norm(self.state[:3] - self.target_state[:3])
-        terminated = bool(dist < 0.5)
         truncated  = bool(self.current_step >= self.max_steps)
-        info = {"distance": float(dist)}
+        info = {"distance": float(dist), "followed": int(self.totally_behind)}
 
-        return self._get_obs(), reward, terminated, truncated, info
+        return self._get_obs(), reward, False, truncated, info
 
     def render(self, mode='human'):
         print("Agent:", self.state[:3], "Target:", self.target_state[:3])

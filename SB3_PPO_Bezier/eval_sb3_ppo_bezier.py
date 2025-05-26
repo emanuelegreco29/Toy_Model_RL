@@ -15,11 +15,11 @@ def load_latest_model(model_dir='models', prefix='ppo_sb3_bezier_', ext='.zip'):
         raise FileNotFoundError(f"No model files matching {prefix}*{ext}")
     latest = max(files, key=os.path.getmtime)
     print(f"Loading model: {latest}")
-    return PPO.load(latest)
+    return PPO.load(latest, device='cpu')
 
 
 def evaluate_model(model, num_episodes=10):
-    trajectories, target_trajs, rewards, distances = [], [], [], []
+    trajectories, target_trajs, rewards, distances, followed = [], [], [], [], []
     env = PointMassEnv()
     for ep in range(num_episodes):
         obs, _ = env.reset()
@@ -36,10 +36,11 @@ def evaluate_model(model, num_episodes=10):
                 target_path.append(env.target_state[:3].copy())
                 rewards.append(ep_reward)
                 distances.append(info.get('distance', np.nan))
+                followed.append(info.get('followed', np.nan))
                 break
         trajectories.append(np.array(agent_path))
         target_trajs.append(np.array(target_path))
-    return trajectories, target_trajs, rewards, distances
+    return trajectories, target_trajs, rewards, distances, followed
 
 
 def plot_coordinates(agent_traj, target_traj, title_prefix='Episode', save_dir='plots'):
@@ -96,19 +97,19 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_
 
 model = load_latest_model()
 print("Model loaded successfully.")
-timestamp = datetime.datetime.now().strftime('%Y%m%d')
+timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 save_dir = os.path.join('plots', f"sb3_bezier_eval_{timestamp}")
 os.makedirs(save_dir, exist_ok=True)
 num_ep = 100
 print(f"Evaluating model for {num_ep} episodes...")
-trajectories, target_trajs, rewards, distances = evaluate_model(model, num_ep)
+trajectories, target_trajs, rewards, distances, followed = evaluate_model(model, num_ep)
 
-print(f"Average reward: {np.mean(rewards):.2f} | Average distance: {np.mean(distances):.2f}")
+print(f"Average reward: {np.mean(rewards):.2f} | Average following steps: {np.mean(followed):.2f}")
 
 best_idx = int(np.argmax(rewards))
 worst_idx = int(np.argmin(rewards))
-print(f"Best Episode {best_idx+1} | Reward: {rewards[best_idx]:.2f} | Distance: {distances[best_idx]:.2f}")
-print(f"Worst Episode {worst_idx+1} | Reward: {rewards[worst_idx]:.2f} | Distance: {distances[worst_idx]:.2f}")
+print(f"Best Episode {best_idx+1} | Reward: {rewards[best_idx]:.2f} | Followed target for: {followed[best_idx]}")
+print(f"Worst Episode {worst_idx+1} | Reward: {rewards[worst_idx]:.2f} | Followed target for: {followed[worst_idx]}")
 
 print("Plotting coordinate time-series...")
 plot_coordinates(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode', save_dir=save_dir)
