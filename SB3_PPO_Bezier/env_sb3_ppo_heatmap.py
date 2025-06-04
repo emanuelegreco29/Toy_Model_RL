@@ -2,6 +2,7 @@ import gymnasium as gym
 from scipy.interpolate import CubicSpline
 from gymnasium import spaces
 import numpy as np
+import math
 from collections import deque
 
 # Generate a smooth 3D B-spline trajectory
@@ -48,8 +49,7 @@ class PointMassEnv(gym.Env):
         # --- Storico target ---
         self.K_history = K_history
 
-        # --- Parametri movimento e bounds 3D ---
-        self.bounds = np.array([[0, 10.0], [0, 10.0], [0, 10.0]], dtype=np.float32)
+        self.bounds = np.array([[0, 10.0], [0, 10.0], [0, 10.0]], dtype=np.float32) # These are target bounds
         self.initial_speed = 1.0
         self.max_step = 0.5
 
@@ -57,7 +57,7 @@ class PointMassEnv(gym.Env):
         self.delta_yaw = 0.4
         self.delta_v = 0.1
         self.delta_pitch = 0.4
-        self.v_max = 1.5
+        self.v_max = 1.0
         self.v_min = 0.1
 
         # --- Azione e osservazione ---
@@ -68,12 +68,14 @@ class PointMassEnv(gym.Env):
         obs_dim = 6 + 3*(self.K_history+1) + 3
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
-        self.tail_offset    = 2.0    # distanza dietro target
+        # Variables for heatmap
+        self.tail_offset    = 0.5    # distanza dietro al target
         self.max_reward     = 1.0
-        self.min_reward     = -1.0
-        self.heatmap_method = 'linear'
-        self.sigma_dist     = 2.0    # larghezza gaussiana su distanza
-        self.sigma_z        = 1.0    # larghezza gaussiana su quota
+        self.min_reward     = 0.0
+        self.heatmap_method = 'gaussian'
+        self.sigma_dist     = 15.0    # larghezza gaussiana su distanza
+        self.sigma_z        = 6.0    # larghezza gaussiana su quota
+        self.sigma_heading  = np.deg2rad(60.0) # gradi in radianti, scarto accettabile per l'heading
 
         self.reset()
 
@@ -82,6 +84,7 @@ class PointMassEnv(gym.Env):
             np.random.seed(seed)
         self.current_step = 0
         self.totally_behind = 0
+        self.tracking_counter = 0
 
         self.target_traj = generate_bspline_trajectory(
             bounds=self.bounds,
@@ -147,13 +150,13 @@ class PointMassEnv(gym.Env):
         # Agent->Target vector
         vec = agent_pos - target_pos
         dist = np.linalg.norm(vec)
-        if dist > 1.0:
+        if dist > 2.0:
             return False
 
         # Projection along direction
         proj = np.dot(vec, dir_unit)
         # Condition to be behind (inside the cone)
-        if not (-1.0 <= proj <= 0.0):
+        if not (-2.0 <= proj <= 0.0):
             return False
 
         # Check perpendicular distance
@@ -169,6 +172,9 @@ class PointMassEnv(gym.Env):
         # Fattore distanza (gaussiano o lineare)
         if self.heatmap_method == 'gaussian':
             f_dist = np.exp(-0.5 * (d3 / self.sigma_dist) ** 2)
+        elif self.heatmap_method == 'slow_exp':
+            lam = 0.2  # The smaller this value, the slower the decay
+            f_dist = np.exp(-lam * d3)
         else:
             max_d = np.linalg.norm(self.bounds[:,1] - self.bounds[:,0])
             f_dist = np.clip(1 - d3 / max_d, 0, 1)
@@ -179,12 +185,21 @@ class PointMassEnv(gym.Env):
 
         # Fattore heading (dot product normalizzato)
         ux, uy, uz = vec / d3
-        alignment = -(ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])
-        f_head = np.clip(alignment, 0, 1)
+        td_x, td_y, td_z = target_dir / (np.linalg.norm(target_dir) + 1e-8)
+        # 3) Calcolo del coseno dell'angolo tra i due vettori
+        cos_theta = ux * td_x + uy * td_y + uz * td_z
+        # Clip per evitare errori numerici fuori dall'intervallo [-1,1]
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        theta = np.arccos(cos_theta)
+        if(np.linalg.norm(target_dir[:2]) < 1e-6):
+            f_head = 1.0
+        else:
+            f_head = np.exp(-0.5 * (theta / self.sigma_heading) ** 2)
 
         # Reward combinato, normalizzato fra min_reward e max_reward
-        r = self.max_reward * f_dist * f_z * f_head
-        return float(np.clip(r, self.min_reward, self.max_reward))
+        r = f_dist * f_z * f_head
+        r_neg = r - 1.0
+        return float(np.clip(r_neg, -1.0, 0.0))
 
     def compute_reward(self, prev_agent, cur_agent) -> float:
         # Calcola direzione target dal delta storico
@@ -216,7 +231,6 @@ class PointMassEnv(gym.Env):
         self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
 
         self.current_step += 1
-        # Reward WEZ pointwise
         reward = self.compute_reward(prev_agent, self.state)
 
         # Tracking
