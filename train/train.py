@@ -1,11 +1,12 @@
-import os
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
-from env_sb3_ppo_bezier import PointMassEnv
+from environments.bezier_history import PointMassEnv as BezierEnv
 
 class EpisodeLogger:
     def __init__(self):
@@ -27,7 +28,38 @@ class EpisodeLogger:
                 print(f"Episode {n} | Reward: {r:.2f} | Followed for: {f}")
         return True
 
-env = DummyVecEnv([lambda: Monitor(PointMassEnv())])
+# Choose the environment to train on    
+print("Choose the environment to train on: \n1. Bezier trajectory")
+choice = input("Environment: ")
+if choice != '1':
+    raise ValueError("Invalid choice. Only option 1 is available.")
+else:
+    chosen_env = 'bezier_history'
+
+# Choose the reward function
+print("Choose the reward function: \n1. Predictive reward")
+choice = input("Reward function: ")
+if choice != '1':
+    raise ValueError("Invalid choice. Only option 1 is available.")
+else:
+    chosen_reward = 'predictive'
+
+# Choose the algorithm to train
+#print("Choose the algorithm to train: \n1. PPO")
+#choice = input("Algorithm: ")
+#if choice != '1':
+#    raise ValueError("Invalid choice. Only option 1 is available.")
+#else:
+#    chosen_algorithm = 'ppo'
+
+# Choose the number of episodes
+print("Choose the number of episodes to train.\n")
+episodes_number = input("Episodes: ")
+episodes_number = int(episodes_number)
+
+if chosen_env == 'bezier_history':
+    env = DummyVecEnv([lambda: Monitor(BezierEnv(reward_fn=chosen_reward))])
+
 model = PPO(
     "MlpPolicy", env,
     learning_rate=1e-4,
@@ -40,7 +72,7 @@ model = PPO(
 )
 
 callback = EpisodeLogger()
-total_timesteps = 500 * 1000
+total_timesteps = 500 * episodes_number
 model.learn(total_timesteps=total_timesteps, callback=callback)
 
 eps = np.arange(1, len(callback.rewards) + 1)
@@ -54,5 +86,5 @@ plt.show()
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 os.makedirs('models', exist_ok=True)
-model.save(f'models/ppo_sb3_bezier_{ts}.zip')
+model.save(f'models/ppo_sb3_test_{ts}.zip')
 print("\nTraining completed!")

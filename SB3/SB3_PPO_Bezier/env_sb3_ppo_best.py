@@ -3,6 +3,7 @@ from scipy.interpolate import CubicSpline
 from gymnasium import spaces
 import numpy as np
 from collections import deque
+from predictor import BSplinePredictor
 
 # Generate a smooth 3D B-spline trajectory
 def generate_bspline_trajectory(bounds: np.ndarray, max_step: float, dt: float,
@@ -31,6 +32,7 @@ class PointMassEnv(gym.Env):
 
     def __init__(self, K_history: int = 1):
         super().__init__()
+        self.predictor = BSplinePredictor(method='adaptive', window_size=10)
         # History length for past K target states
         self.K_history = K_history
         # Movement parameters
@@ -42,7 +44,7 @@ class PointMassEnv(gym.Env):
         self.delta_yaw = 0.4
         self.delta_v = 0.1
         self.delta_pitch = 0.4
-        self.v_max = 1.5
+        self.v_max = 1.2
         self.v_min = 0.1
 
         # Action space: change in heading and altitude
@@ -61,6 +63,7 @@ class PointMassEnv(gym.Env):
             np.random.seed(seed)
         self.current_step = 0
         self.totally_behind = 0
+        self.tracking_counter = 0
 
         # Agent starts at origin, speed=1, yaw=0, pitch=0
         # self.state = np.array([0.0, 0.0, 0.0, self.initial_speed, 0.0, 0.0], dtype=np.float32)
@@ -142,17 +145,28 @@ class PointMassEnv(gym.Env):
         horizon: passi futuri da predire (default 1).
         Restituisce array (3,) = posizione predetta a t+horizon.
         """
-        k = history.shape[0]
-        t = np.arange(k).reshape(-1,1)
-        A = np.hstack([t, np.ones_like(t)]) # matrix for linear fit
+        #k = history.shape[0]
+        #t = np.arange(k).reshape(-1,1)
+        #A = np.hstack([t, np.ones_like(t)]) # matrix for linear fit
 
-        pred = np.zeros(3, dtype=np.float32)
-        t_next = (k-1) + horizon
-        for dim in range(3):
-            y = history[:, dim]
-            (a, b), *_ = np.linalg.lstsq(A, y, rcond=None)
-            pred[dim] = a * t_next + b
-        return pred
+        #pred = np.zeros(3, dtype=np.float32)
+        #t_next = (k-1) + horizon
+        #for dim in range(3):
+        #    y = history[:, dim]
+        #    (a, b), *_ = np.linalg.lstsq(A, y, rcond=None)
+        #    pred[dim] = a * t_next + b
+        #return pred
+        
+        for point in history:
+            self.predictor.update_history(point)
+        
+        # Ottieni predizione accurata
+        prediction = self.predictor.predict(horizon)
+        
+        # Applica bounds se necessario
+        prediction = np.clip(prediction, self.bounds[:, 0], self.bounds[:, 1])
+        
+        return prediction
     
     def _is_behind(self):
         """
@@ -185,18 +199,18 @@ class PointMassEnv(gym.Env):
         # Agent->Target vector
         vec = agent_pos - target_pos
         dist = np.linalg.norm(vec)
-        if dist > 1.0:
+        if dist > 2.0:
             return False
 
         # Projection along direction
         proj = np.dot(vec, dir_unit)
         # Condition to be behind (inside the cone)
-        if not (-1.0 <= proj <= 0.0):
+        if not (-2.0 <= proj <= 0.0):
             return False
 
         # Check perpendicular distance
         perp_dist = np.linalg.norm(vec - proj * dir_unit)
-        return perp_dist <= 0.5
+        return perp_dist <= 0.25
 
     def compute_reward(self, prev_agent: np.ndarray, cur_agent: np.ndarray) -> float:
         # Distance improvement towards current target
@@ -213,7 +227,6 @@ class PointMassEnv(gym.Env):
         if(self.tracking_counter > 0):
             reward += 1.0 * self.tracking_counter
 
-        # Predictive bonus
         history = np.array(self.target_history)
         pred_next = self._predict_target(history, horizon=5)
         prev_pd = np.linalg.norm(prev_agent[:3] - pred_next)
@@ -275,6 +288,7 @@ class PointMassEnv(gym.Env):
 
         # premiamo fino a +0.2 se alignment==1, 0 se ortogonale
         reward += 0.2 * max(0.0, alignment)
+        #reward = (1.0 / (1.0 + np.exp(-reward))) - 1.0 # Sigmoid per normalizzazione
 
         return float(reward)
     
