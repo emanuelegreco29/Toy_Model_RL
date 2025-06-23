@@ -2,9 +2,15 @@ import os
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+
+from sb3_contrib import RecurrentPPO
+from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy as MlpLstmPolicy
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
+
+#from env_sb3_ppo_field import PointMassEnv
+#from env_sb3_ppo_line import PointMassEnv
 from env_sb3_ppo_best import PointMassEnv
 #from env_sb3_ppo_heatmap import PointMassEnv
 
@@ -25,21 +31,41 @@ class EpisodeLogger:
                 self.rewards.append(r)
                 self.distances.append(d)
                 self.followed.append(f)
-                print(f"Episode {n} | Reward: {r:.2f} | Followed for: {f}")
+                print(f"Episode {n} | Reward: {r:.2f} | Followed for: {f} | Distance: {d:.2f}")
         return True
 
-env = DummyVecEnv([lambda: Monitor(PointMassEnv())])
+env = DummyVecEnv([lambda: Monitor(PointMassEnv(K_history = 1))])
 model = PPO(
     "MlpPolicy", env,
-    learning_rate=1e-4,
-    ent_coef=0.02,
-    clip_range=0.2,
-    n_epochs=10,
-    batch_size=64,
+    policy_kwargs=dict(net_arch=[128, 128]),
+    learning_rate=3e-5,
+    ent_coef=0.0,
+    clip_range=0.1,
+    n_epochs=20,
+    batch_size=256,
     verbose=0,
     device="cpu"
 )
 
+#model = RecurrentPPO(
+#    policy=MlpLstmPolicy,
+#    env=env,
+#    learning_rate=3e-5,
+#    ent_coef=0.01,
+#    clip_range=0.1,
+#    n_steps=512,              # lunghezza rollout sequence
+#    batch_size=64,            # per GRU serve batch_size ≤ n_steps
+#    n_epochs=10,
+#    gamma=0.99,
+#    gae_lambda=0.95,
+#    verbose=0,
+#    device="cpu",
+#    policy_kwargs={
+#        "lstm_hidden_size": 128,   # dimensione stato GRU
+#        "n_lstm_layers": 1,        # numero layer GRU
+#        "shared_lstm": False       # una GRU per actor+critic
+#    }
+#)
 
 callback = EpisodeLogger()
 total_timesteps = 500 * 2000
@@ -56,5 +82,5 @@ plt.show()
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 os.makedirs('models', exist_ok=True)
-model.save(f'models/ppo_sb3_bezier_best_{ts}.zip')
+model.save(f'models/ppo_sb3_field_{ts}.zip')
 print("\nTraining completed!")

@@ -3,7 +3,6 @@ from scipy.interpolate import CubicSpline
 from gymnasium import spaces
 import numpy as np
 from collections import deque
-from predictor import BSplinePredictor
 
 # Generate a smooth 3D B-spline trajectory
 def generate_bspline_trajectory(bounds: np.ndarray, max_step: float, dt: float,
@@ -30,11 +29,13 @@ class PointMassEnv(gym.Env):
     dt = 0.1
     max_steps = 500
 
-    def __init__(self, K_history: int = 1):
+    def __init__(self, K_history: int = 1, phase: int = 1):
         super().__init__()
-        #self.predictor = BSplinePredictor(method='adaptive', window_size=10)
         # History length for past K target states
         self.K_history = K_history
+
+        self.phase = phase 
+
         # Movement parameters
         self.bounds = np.array([[0, 10.0], [0, 10.0], [0, 10.0]], dtype=np.float32)
         self.initial_speed = 1.0
@@ -53,7 +54,7 @@ class PointMassEnv(gym.Env):
         self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
 
         # Observation: agent state (6) + target history (K+1 states of length 3, just x,y,z)
-        obs_dim = 6 + 3 * (self.K_history + 1) + 3
+        obs_dim = 6 + 3 * (self.K_history + 1) + 3 + 3
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self.reset()
@@ -133,13 +134,16 @@ class PointMassEnv(gym.Env):
         # flatten della history delle posizioni come prima
         flat_hist = hist.ravel()
 
+        prediction = self._predict_target(hist, horizon=1)
+
         return np.concatenate([
             st,
             flat_hist,
-            [last_speed, last_acc, last_yaw_rate]
+            [last_speed, last_acc, last_yaw_rate],
+            prediction
         ]).astype(np.float32)
     
-    def _predict_target(self, history, horizon = 3):
+    def _predict_target(self, history, horizon = 1):
         """
         history: array di forma (k,3) con le ultime k posizioni.
         horizon: passi futuri da predire (default 1).
@@ -156,17 +160,6 @@ class PointMassEnv(gym.Env):
             (a, b), *_ = np.linalg.lstsq(A, y, rcond=None)
             pred[dim] = a * t_next + b
         return pred
-        
-        #for point in history:
-        #    self.predictor.update_history(point)
-        
-        # Ottieni predizione accurata
-        #prediction = self.predictor.predict(horizon)
-        
-        # Applica bounds se necessario
-        #prediction = np.clip(prediction, self.bounds[:, 0], self.bounds[:, 1])
-        
-        #return prediction
     
     def _is_behind(self):
         """
@@ -213,84 +206,28 @@ class PointMassEnv(gym.Env):
         return perp_dist <= 0.25
 
     def compute_reward(self, prev_agent: np.ndarray, cur_agent: np.ndarray) -> float:
-        # Distance improvement towards current target
+        # fase 1: imparare a mettersi in coda
         cur_target = self.target_history[-1]
         prev_dist = np.linalg.norm(prev_agent[:3] - cur_target[:3])
         cur_dist  = np.linalg.norm(cur_agent[:3]  - cur_target[:3])
         imp = prev_dist - cur_dist
-        if imp > 0:
-            reward = imp
-        else:
-            reward = -0.5 * abs(imp)
+        if self.phase == 1:
+            reward = 10 if self._is_behind() else -0.1
+            reward += imp * 2 if imp > 0 else -0.5 * abs(imp)
+            return float(reward)
 
-        # Tracking bonus
-        if(self.tracking_counter > 0):
-            reward += 1.0 * self.tracking_counter
-
-        # Predictive bonus
-        history = np.array(self.target_history)
-        pred_next = self._predict_target(history, horizon=5)
-        prev_pd = np.linalg.norm(prev_agent[:3] - pred_next)
-        cur_pd  = np.linalg.norm(cur_agent[:3]  - pred_next)
-        pred_imp = prev_pd - cur_pd
-        reward += 0.1 * pred_imp
-
-        # agent_v and agent_yaw_rate
-        agent_v = cur_agent[3]
-        # Delta yaw cur and prev
-        delta_yaw_agent = (cur_agent[4] - prev_agent[4]) / self.dt
-
-        # target_speed, target_acc and target_yaw_rate
-        hist = np.array(self.target_history)
-        deltas = np.diff(hist, axis=0)             # (K,3)
-        speeds = np.linalg.norm(deltas, axis=1)    # (K,)
-        vels   = deltas / self.dt                  # (K,3)
-        accs   = np.diff(speeds) / self.dt         # (K-1,)
-        headings = np.arctan2(deltas[:,1], deltas[:,0])
-        yaw_rates = np.diff(headings) / self.dt
-
-        # Use latest values
-        tgt_speed    = speeds[-1]    if len(speeds)>0    else 0.0
-        tgt_acc      = accs[-1]      if len(accs)>0      else 0.0
-        tgt_yaw_rate = yaw_rates[-1] if len(yaw_rates)>0 else 0.0
-
-        # Slow down if target slows down
-        dv_target = tgt_acc * self.dt
-        dv_agent  = agent_v - prev_agent[3]
-
-        # if dv_target>0) no reward
-        if dv_target < 0:
-            # error is normalized
-            err_v = abs(dv_agent - dv_target) / 0.5
-            vel_bonus = max(0.0, 1.0 - err_v)  # 1 if perfect, 0 if error>=0.5
-        else:
-            vel_bonus = 0.0
-
-        # Reward if predict change of direction
-        err_yaw = abs(delta_yaw_agent - tgt_yaw_rate)
-        # normalization
-        yaw_bonus = max(0.0, 1.0 - err_yaw / np.pi)
-
-        # only positive rewards (or 0)
-        reward += 0.2 * vel_bonus
-        reward += 0.2 * yaw_bonus
-
-        # vettore agente→target proiettato in XY
-        vec = self.target_state[:2] - cur_agent[:2]
-        dist_xy = np.linalg.norm(vec) + 1e-6
-        dir_xy = vec / dist_xy
-
-        # agent XY heading
-        yaw = cur_agent[4]
-        head_xy = np.array([np.cos(yaw), np.sin(yaw)], dtype=np.float32)
-
-        # coseno dell’angolo tra dove guardo e dove devo andare
-        alignment = np.dot(head_xy, dir_xy)
-
-        # premiamo fino a +0.2 se alignment==1, 0 se ortogonale
-        reward += 0.2 * max(0.0, alignment)
-        #reward = (1.0 / (1.0 + np.exp(-reward))) - 1.0 # Sigmoid per normalizzazione
-
+        # fase 2: rimanere in coda + replicare (pedissequa + anticipazione)
+        reward = 0.0
+        # 2.1 Bonus staying-in-back
+        reward += 0.5 * int(self._is_behind())
+        # 2.2 Penalità distanza istantanea
+        cur_target = self.target_history[-1]
+        dist = np.linalg.norm(cur_agent[:3] - cur_target)
+        reward += -1.0 * dist
+        # 2.3 Anticipazione sui prossimi 3 passi
+        pred = self._predict_target(np.array(self.target_history), horizon=3)
+        anticipation_err = np.linalg.norm(cur_agent[:3] - pred)
+        reward += -0.2 * anticipation_err
         return float(reward)
     
     def step(self, action):
@@ -332,12 +269,17 @@ class PointMassEnv(gym.Env):
             self.totally_behind += 1
         else:
             self.tracking_counter = 0
+
         reward = self.compute_reward(prev_agent, self.state)
+
+        # per fase 1, passaggio automatico a fase 2 se stazionamento conseguito
+        if self.phase == 1 and self.tracking_counter >= 50:
+            self.phase = 2
 
         # Check termination
         dist = np.linalg.norm(self.state[:3] - self.target_state[:3])
         truncated  = bool(self.current_step >= self.max_steps)
-        info = {"distance": float(dist), "followed": int(self.totally_behind)}
+        info = {"distance": float(dist), "followed": int(self.totally_behind), "phase": int(self.phase)}
 
         return self._get_obs(), reward, False, truncated, info
 

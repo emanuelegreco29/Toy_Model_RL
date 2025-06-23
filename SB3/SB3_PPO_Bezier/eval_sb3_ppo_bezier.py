@@ -6,11 +6,13 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, PillowWriter
 from stable_baselines3 import PPO
 import datetime
+
+#from env_sb3_ppo_line import PointMassEnv
 from env_sb3_ppo_best import PointMassEnv
 #from env_sb3_ppo_heatmap import PointMassEnv
 
 
-def load_latest_model(model_dir='models', prefix='ppo_sb3_bezier_', ext='.zip'):
+def load_latest_model(model_dir='models', prefix='ppo_sb3_field_', ext='.zip'):
     files = glob.glob(os.path.join(model_dir, f"{prefix}*{ext}"))
     if not files:
         raise FileNotFoundError(f"No model files matching {prefix}*{ext}")
