@@ -1,11 +1,10 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from collections import deque
 
 class UCAV(gym.Env):
     """
-    Point‐mass UCAV environment in 3D with continuous action space:
+    Point-mass UCAV environment in 3D with continuous action space:
       - actions: [n_x, n_z, mu]
         * n_x: tangential acceleration factor (in g), in [-2, 2]
         * n_z: normal acceleration factor (in g), in [-4, 4]
@@ -15,13 +14,11 @@ class UCAV(gym.Env):
     Dynamics are integrated with simple Euler steps.
     """
     def __init__(self,
-                 target_position=np.array([1000.0, 0.0,   100.0]),   # [m]
-                 target_velocity=np.array([  200.0, 0.0,     0.0]),   # [m/s]
                  dt=0.1):
         self.dt = dt
         self.g = 9.81
-        self.target_position = np.array(target_position, dtype=np.float32)
-        self.target_velocity = np.array(target_velocity, dtype=np.float32)
+        self.target_position = np.array([1000.0, 0.0, 100.0], dtype=np.float32)
+        self.target_velocity = np.array([200.0, 0.0, 0.0], dtype=np.float32)  # [m/s]
 
         # Continuous action space
         self.action_space = spaces.Box(
@@ -39,16 +36,16 @@ class UCAV(gym.Env):
 
         self.reward_params = {
             'R_w':       500.0,    # weapon attack range [m]
-            'phi_w':     np.deg2rad(10.0),  # max attack angle φ_w [rad]
-            'q_w':       np.deg2rad(10.0),  # max aspect angle q_w [rad]
+            'phi_w':     np.deg2rad(20.0),  # max attack angle φ_w [rad]
+            'q_w':       np.deg2rad(20.0),  # max aspect angle q_w [rad]
             'R_min':     50.0,
             'R_max':     2000.0,
             'z_min':     20.0,
             'z_max':     500.0,
             'v_min':     100.0,
             'v_max':     400.0,
-            'sigma_ang': 1.0,      # for angle advantage
-            'sigma_dist': 200.0,   # for distance advantage
+            'sigma_ang': 2.0,      # for angle advantage
+            'sigma_dist': 400.0,   # for distance advantage
             'sigma_alt': 100.0,    # for altitude advantage
             'omega_ang': 1.0,
             'omega_d':   1.0,
@@ -65,7 +62,7 @@ class UCAV(gym.Env):
         v0 = 150.0                      # [m/s]
         gamma0, psi0 = 0.0, 0.0         # [rad]
         self.state = np.array([x0, y0, z0, v0, gamma0, psi0], dtype=np.float32)
-        return self._get_obs()
+        return self._get_obs(), {}
     
 
     def _get_obs(self):
@@ -116,12 +113,9 @@ class UCAV(gym.Env):
         # Euler integration
         self.state += np.array([dx, dy, dz, dv, dgamma, dpsi], dtype=np.float32) * self.dt
 
-        obs = self._get_obs()
-        reward = self.total_reward(obs, self.reward_params)
-        done = False
-        info = {}
+        reward = self.total_reward(self._get_obs(), self.reward_params)
 
-        return obs, reward, done, info
+        return self._get_obs(), reward, False, False, {}
     
     def compute_final_reward(self, R, ATA, AA, R_w, phi_w, q_w):
         """
@@ -219,6 +213,7 @@ class UCAV(gym.Env):
             ATA, AA, R, R_w, delta_h,
             sigma_ang, sigma_dist, sigma_alt
         )
+        
         r_aux = self.compute_auxiliary_reward(
             f_ang, f_d, f_h,
             ω_ang, ω_dist, ω_alt,

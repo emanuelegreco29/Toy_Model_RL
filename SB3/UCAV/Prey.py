@@ -1,7 +1,7 @@
 import numpy as np
 
 class StraightLineAttacker:
-    def __init__(self, v=200.0, bounds=((-500,500),(-500,500),(50,150)), dt=0.1):
+    def __init__(self, v=150.0, bounds=((-500,500),(-500,500),(50,150)), dt=0.1):
         self.v = v
         self.bounds = bounds
         self.dt = dt
