@@ -7,7 +7,6 @@ from matplotlib import pyplot as plt
 from collections import deque
 
 # Generate a smooth 3D B-spline trajectory
-
 def generate_bspline_trajectory(bounds: np.ndarray, max_step: float, dt: float,
                                  T: int = 500, K: int = 6) -> np.ndarray:
     """
@@ -60,13 +59,14 @@ class PointMassEnv(gym.Env):
         self.delta_pitch = 0.4
         self.v_max = 1.5
         self.v_min = 0.1
+        self.delta_acc = 0.1
 
         # --- Azione e osservazione ---
-        low_act = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
-        high_act = np.array([ self.delta_v,  self.delta_yaw,  self.delta_pitch], dtype=np.float32)
+        low_act = np.array([-self.delta_acc, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
+        high_act = np.array([ self.delta_acc,  self.delta_yaw,  self.delta_pitch], dtype=np.float32)
         self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
 
-        obs_dim = 17 #6 + 3*(self.K_history+1) + 3
+        obs_dim = 17
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # scala reward in [-1,0]
@@ -214,13 +214,30 @@ class PointMassEnv(gym.Env):
 
         # Muove agent
         x, y, z, v, yaw, pitch = self.state
-        dv, dyaw, dpitch = action
-        v     = np.clip(v + dv, self.v_min, self.v_max)
+
+        # dv, dyaw, dpitch = action
+        # v     = np.clip(v + dv, self.v_min, self.v_max)
+        # yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
+        # pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
+        # dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
+        # dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
+        # dz = v * np.sin(pitch)               * self.dt
+        
+        # action = [accelerazione, delta_yaw, delta_pitch]
+        acc, dyaw, dpitch = action
+
+        # Applica accelerazione sul velocity scalar, poi clamp tra v_min e v_max
+        v = np.clip(v + acc * self.dt, self.v_min, self.v_max)
+
+        # Yaw e pitch come prima
         yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
         pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
+
+        # Integrazione posizione con nuova v
         dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
         dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
         dz = v * np.sin(pitch)               * self.dt
+
         x, y, z = x+dx, y+dy, z+dz
         self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
 
