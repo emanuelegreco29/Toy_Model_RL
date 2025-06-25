@@ -62,8 +62,8 @@ class PointMassEnv(gym.Env):
         self.delta_acc = 0.1
 
         # --- Azione e osservazione ---
-        low_act = np.array([-self.delta_acc, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
-        high_act = np.array([ self.delta_acc,  self.delta_yaw,  self.delta_pitch], dtype=np.float32)
+        low_act = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
+        high_act = np.array([ self.delta_v,  self.delta_yaw,  self.delta_pitch], dtype=np.float32)
         self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
 
         obs_dim = 17
@@ -98,18 +98,19 @@ class PointMassEnv(gym.Env):
         self.target_state = first.copy()
 
         # Posiziona agent dietro target
-        if len(self.target_traj) > 1:
-            p0, p1 = self.target_traj[0], self.target_traj[1]
-            dir_vec = p1 - p0
-            dir_unit = dir_vec / (np.linalg.norm(dir_vec)+1e-8)
-            init_pos = p0 - 2.0 * dir_unit
-            yaw   = np.arctan2(dir_unit[1], dir_unit[0])
-            pitch = np.arcsin(np.clip(dir_unit[2], -1.0, 1.0))
-        else:
-            init_pos = np.zeros(3, dtype=np.float32)
-            yaw = pitch = 0.0
+        # if len(self.target_traj) > 1:
+        #     p0, p1 = self.target_traj[0], self.target_traj[1]
+        #     dir_vec = p1 - p0
+        #     dir_unit = dir_vec / (np.linalg.norm(dir_vec)+1e-8)
+        #     init_pos = p0 - 2.0 * dir_unit
+        #     yaw   = np.arctan2(dir_unit[1], dir_unit[0])
+        #     pitch = np.arcsin(np.clip(dir_unit[2], -1.0, 1.0))
+        # else:
+        #     init_pos = np.zeros(3, dtype=np.float32)
+        #     yaw = pitch = 0.0
 
-        self.state = np.array([*init_pos, self.initial_speed, yaw, pitch], dtype=np.float32)
+        #self.state = np.array([*init_pos, self.initial_speed, yaw, pitch], dtype=np.float32)
+        self.state = np.array([0, 0, 0, self.initial_speed, 0.0, 0.0], dtype=np.float32)
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -215,28 +216,28 @@ class PointMassEnv(gym.Env):
         # Muove agent
         x, y, z, v, yaw, pitch = self.state
 
-        # dv, dyaw, dpitch = action
-        # v     = np.clip(v + dv, self.v_min, self.v_max)
-        # yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
-        # pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
-        # dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
-        # dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
-        # dz = v * np.sin(pitch)               * self.dt
-        
-        # action = [accelerazione, delta_yaw, delta_pitch]
-        acc, dyaw, dpitch = action
-
-        # Applica accelerazione sul velocity scalar, poi clamp tra v_min e v_max
-        v = np.clip(v + acc * self.dt, self.v_min, self.v_max)
-
-        # Yaw e pitch come prima
+        dv, dyaw, dpitch = action
+        v     = np.clip(v + dv, self.v_min, self.v_max)
         yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
         pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
-
-        # Integrazione posizione con nuova v
         dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
         dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
         dz = v * np.sin(pitch)               * self.dt
+        
+        # # action = [accelerazione, delta_yaw, delta_pitch]
+        # acc, dyaw, dpitch = action
+
+        # # Applica accelerazione sul velocity scalar, poi clamp tra v_min e v_max
+        # v = np.clip(v + acc * self.dt, self.v_min, self.v_max)
+
+        # # Yaw e pitch come prima
+        # yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
+        # pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
+
+        # # Integrazione posizione con nuova v
+        # dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
+        # dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
+        # dz = v * np.sin(pitch)               * self.dt
 
         x, y, z = x+dx, y+dy, z+dz
         self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
