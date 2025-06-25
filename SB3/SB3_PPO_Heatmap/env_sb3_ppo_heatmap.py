@@ -194,7 +194,6 @@ class PointMassEnv(gym.Env):
         agent_pos = self.state[:3]
         target_pos = self.target_state
         target_dir = self._get_target_direction()
-
         vec = agent_pos - target_pos
         d3 = np.linalg.norm(vec) + 1e-8
         f_dist = np.exp(-0.5 * (d3/10) ** 1)
@@ -207,7 +206,7 @@ class PointMassEnv(gym.Env):
         return f_dist * f_head - 1.0
 
     def step(self, action):
-        prev_agent = self.state.copy()
+        self.prev_state = self.state.copy()
         # Avanza target
         idx = min(self.current_step+1, len(self.target_traj)-1)
         self.target_history.append(self.target_traj[idx].copy())

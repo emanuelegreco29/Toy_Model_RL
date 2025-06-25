@@ -34,7 +34,7 @@ class EpisodeLogger:
 env = DummyVecEnv([lambda: Monitor(PointMassEnv(K_history = 1))])
 model = PPO(
     "MlpPolicy", env,
-    policy_kwargs=dict(net_arch=[128, 128]),
+    policy_kwargs=dict(net_arch=[256, 256]),
     learning_rate=1e-4,
     ent_coef=0.05,
     clip_range=0.2,
