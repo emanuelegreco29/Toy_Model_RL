@@ -192,18 +192,26 @@ class PointMassEnv(gym.Env):
     
     def compute_reward(self):
         agent_pos = self.state[:3]
+        yaw, pitch = self.state[4:6]
         target_pos = self.target_state
         target_dir = self._get_target_direction()
+        
         vec = agent_pos - target_pos
         d3 = np.linalg.norm(vec) + 1e-8
         f_dist = np.exp(-0.5 * (d3/10) ** 1)
 
         ux, uy, uz = vec / d3
         kappa = 1
-        alignment = (1 - (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
-        f_head = np.clip(alignment, 0, 1)
+        alignment_pos = (1 + (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
+        f_head_pos = np.clip(alignment_pos, 0, 1)
+        
+        dx = np.cos(pitch) * np.cos(yaw)
+        dy = np.cos(pitch) * np.sin(yaw)
+        dz = np.sin(pitch)
+        alignment_vel = (1 + (dx*target_dir[0] + dy*target_dir[1] + dz*target_dir[2])**kappa) / 2
+        f_head_vel = np.clip(alignment_vel, 0, 1)
 
-        return f_dist * f_head - 1.0
+        return f_dist * f_head_pos * f_head_vel - 1.0
 
     def step(self, action):
         self.prev_state = self.state.copy()
@@ -212,9 +220,8 @@ class PointMassEnv(gym.Env):
         self.target_history.append(self.target_traj[idx].copy())
         self.target_state = self.target_traj[idx].copy()
 
-        # Muove agent
+        # Muove agent (controllo in velocità, yaw e pitch)
         x, y, z, v, yaw, pitch = self.state
-
         dv, dyaw, dpitch = action
         v     = np.clip(v + dv, self.v_min, self.v_max)
         yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi

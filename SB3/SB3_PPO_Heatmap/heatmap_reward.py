@@ -4,22 +4,23 @@ import matplotlib.pyplot as plt
 target_pos = np.array([0,0,0])
 target_dir = np.array([1,0,0])
 
-def compute_reward_pointwise(agent_pos, target_pos, target_dir):
-        # Punto apice del cono (dietro il target)
+def compute_reward_pointwise(agent_pos, target_pos, target_dir, yaw=0, pitch=0):
         vec = agent_pos - target_pos
         d3 = np.linalg.norm(vec) + 1e-8
+        f_dist = np.exp(-0.5 * (d3/10) ** 1) 
 
-        # Fattore distanza (gaussiano o lineare)
-        f_dist = np.exp(-0.5 * (d3/10) ** 1)
-
-        # Fattore heading (dot product normalizzato)
         ux, uy, uz = vec / d3
-        kappa = 1  # Parametro di forma per il cono, usare numeri dispari [1,3,5,7] per un cono più stretto
-        alignment = (1-(ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa)/2
-        f_head = np.clip(alignment, 0, 1)
+        kappa = 1
+        alignment_pos = (1 + (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
+        f_head_pos = np.clip(alignment_pos, 0, 1)
+        
+        dx = np.cos(pitch) * np.cos(yaw)
+        dy = np.cos(pitch) * np.sin(yaw)
+        dz = np.sin(pitch)
+        alignment_vel = (1 + (dx*target_dir[0] + dy*target_dir[1] + dz*target_dir[2])**kappa) / 2
+        f_head_vel = np.clip(alignment_vel, 0, 1)
 
-        # Reward combinato, normalizzato fra min_reward e max_reward
-        return f_dist  * f_head - 1.0  # Negative reward
+        return f_dist * f_head_pos * f_head_vel - 1.0
 
 #create a 3D grid of points in the space [-3,3]x[-3,3]x[-3,3]
 def create_grid_points(min_val=-30, max_val=30, step=0.1):
