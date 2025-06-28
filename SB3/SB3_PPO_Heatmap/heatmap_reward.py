@@ -10,17 +10,26 @@ def compute_reward_pointwise(agent_pos, target_pos, target_dir, yaw=0, pitch=0):
         f_dist = np.exp(-0.5 * (d3/10) ** 1) 
 
         ux, uy, uz = vec / d3
-        kappa = 1
-        alignment_pos = (1 + (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
-        f_head_pos = np.clip(alignment_pos, 0, 1)
+        position_vec = np.array([ux, uy, uz])
+        # kappa = 1
+        # alignment_pos = (1 + (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
+        # f_head_pos = np.clip(alignment_pos, 0, 1)
         
         dx = np.cos(pitch) * np.cos(yaw)
         dy = np.cos(pitch) * np.sin(yaw)
         dz = np.sin(pitch)
-        alignment_vel = (1 + (dx*target_dir[0] + dy*target_dir[1] + dz*target_dir[2])**kappa) / 2
-        f_head_vel = np.clip(alignment_vel, 0, 1)
+        direction_vec = np.array([dx, dy, dz])
+        # alignment_vel = (1 + (dx*target_dir[0] + dy*target_dir[1] + dz*target_dir[2])**kappa) / 2
+        # f_head_vel = np.clip(alignment_vel, 0, 1)
+        
+        # Compute the dot product and normalize
+        cos_vel = np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0)
+        cos_pos = np.clip(np.dot(position_vec, target_dir), -1.0, 1.0)
+        
+        f_head_pos = (1 - cos_pos) / 2
+        f_head_vel = (1 + cos_vel) / 2
 
-        return f_dist * f_head_pos * f_head_vel - 1.0
+        return (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
 
 #create a 3D grid of points in the space [-3,3]x[-3,3]x[-3,3]
 def create_grid_points(min_val=-30, max_val=30, step=0.1):
@@ -47,7 +56,7 @@ def plot_heatmap(rewards, grid_points):
     # Create a 2D grid for plotting
     x_unique = np.unique(grid_points[:, 0])
     y_unique = np.unique(grid_points[:, 1])
-    Z = rewards.reshape(len(y_unique), len(x_unique))
+    Z = rewards.reshape(len(y_unique), len(x_unique)).T
 
     plt.figure(figsize=(8, 6))
     plt.imshow(Z, extent=(x_unique.min(), x_unique.max(), y_unique.min(), y_unique.max()), origin='lower', cmap='viridis')

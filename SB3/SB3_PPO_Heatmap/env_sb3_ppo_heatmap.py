@@ -59,7 +59,6 @@ class PointMassEnv(gym.Env):
         self.delta_pitch = 0.4
         self.v_max = 1.5
         self.v_min = 0.1
-        self.delta_acc = 0.1
 
         # --- Azione e osservazione ---
         low_act = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
@@ -68,10 +67,6 @@ class PointMassEnv(gym.Env):
 
         obs_dim = 17
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
-
-        # scala reward in [-1,0]
-        self.max_reward =  0.0
-        self.min_reward = -1.0
 
         self.reset()
 
@@ -96,20 +91,6 @@ class PointMassEnv(gym.Env):
         for _ in range(self.K_history+1):
             self.target_history.append(first)
         self.target_state = first.copy()
-
-        # Posiziona agent dietro target
-        # if len(self.target_traj) > 1:
-        #     p0, p1 = self.target_traj[0], self.target_traj[1]
-        #     dir_vec = p1 - p0
-        #     dir_unit = dir_vec / (np.linalg.norm(dir_vec)+1e-8)
-        #     init_pos = p0 - 2.0 * dir_unit
-        #     yaw   = np.arctan2(dir_unit[1], dir_unit[0])
-        #     pitch = np.arcsin(np.clip(dir_unit[2], -1.0, 1.0))
-        # else:
-        #     init_pos = np.zeros(3, dtype=np.float32)
-        #     yaw = pitch = 0.0
-
-        #self.state = np.array([*init_pos, self.initial_speed, yaw, pitch], dtype=np.float32)
         self.state = np.array([0, 0, 0, self.initial_speed, 0.0, 0.0], dtype=np.float32)
         return self._get_obs(), {}
 
@@ -201,20 +182,22 @@ class PointMassEnv(gym.Env):
         f_dist = np.exp(-0.5 * (d3/10) ** 1)
 
         ux, uy, uz = vec / d3
-        kappa = 1
-        alignment_pos = (1 + (ux*target_dir[0] + uy*target_dir[1] + uz*target_dir[2])**kappa) / 2
-        f_head_pos = np.clip(alignment_pos, 0, 1)
+        position_vec = np.array([ux, uy, uz])
         
         dx = np.cos(pitch) * np.cos(yaw)
         dy = np.cos(pitch) * np.sin(yaw)
         dz = np.sin(pitch)
-        alignment_vel = (1 + (dx*target_dir[0] + dy*target_dir[1] + dz*target_dir[2])**kappa) / 2
-        f_head_vel = np.clip(alignment_vel, 0, 1)
+        direction_vec = np.array([dx, dy, dz])
+        
+        cos_vel = np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0)
+        cos_pos = np.clip(np.dot(position_vec, target_dir), -1.0, 1.0)
+        
+        f_head_pos = (1 - cos_pos) / 2
+        f_head_vel = (1 + cos_vel) / 2
 
-        return f_dist * f_head_pos * f_head_vel - 1.0
+        return (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
 
     def step(self, action):
-        self.prev_state = self.state.copy()
         # Avanza target
         idx = min(self.current_step+1, len(self.target_traj)-1)
         self.target_history.append(self.target_traj[idx].copy())
@@ -224,26 +207,11 @@ class PointMassEnv(gym.Env):
         x, y, z, v, yaw, pitch = self.state
         dv, dyaw, dpitch = action
         v     = np.clip(v + dv, self.v_min, self.v_max)
-        yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
-        pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
+        yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi # Normalizzato tra 180 e -180 gradi
+        pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2) # Normalizzato tra 90 e -90 gradi
         dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
         dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
         dz = v * np.sin(pitch)               * self.dt
-        
-        # # action = [accelerazione, delta_yaw, delta_pitch]
-        # acc, dyaw, dpitch = action
-
-        # # Applica accelerazione sul velocity scalar, poi clamp tra v_min e v_max
-        # v = np.clip(v + acc * self.dt, self.v_min, self.v_max)
-
-        # # Yaw e pitch come prima
-        # yaw   = (yaw   + dyaw   + np.pi) % (2*np.pi) - np.pi
-        # pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
-
-        # # Integrazione posizione con nuova v
-        # dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
-        # dy = v * np.cos(pitch) * np.sin(yaw) * self.dt
-        # dz = v * np.sin(pitch)               * self.dt
 
         x, y, z = x+dx, y+dy, z+dz
         self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
