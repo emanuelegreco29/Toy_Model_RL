@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from env_sb3_ppo_heatmap import PointMassEnv
+from env_sb3_ppo_multi import PointMassEnv
 
 class EpisodeLogger:
     def __init__(self):
@@ -57,5 +57,5 @@ plt.show()
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 os.makedirs('models', exist_ok=True)
-model.save(f'models/ppo_sb3_heatmap_{ts}.zip')
+model.save(f'models/ppo_sb3_multi_{ts}.zip')
 print("\nTraining completed!")
