@@ -55,7 +55,8 @@ class PointMassEnv(gym.Env):
         # Action space: change in heading and altitude
         low_act = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
         high_act = np.array([ self.delta_v, self.delta_yaw,  self.delta_pitch], dtype=np.float32)
-        self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
+        #self.action_space = spaces.Box(low_act, high_act, dtype=np.float32)
+        self.action_space = spaces.Box(low=low_act, high=high_act, shape=(3,), dtype=np.float32)
 
         # Observation: agent state (6) + target history (K+1 states of length 3, just x,y,z)
         obs_dim = 6 + 3 * (self.K_history + 1) + 3

@@ -6,6 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, PillowWriter
 from stable_baselines3 import PPO
 import datetime
+import torch
 
 from env_sb3_ppo_multi import PointMassEnv
 
@@ -20,17 +21,35 @@ def load_latest_model(model_dir='models', prefix='ppo_sb3_multi_', ext='.zip'):
 
 
 def evaluate_model(model, num_episodes=10):
-    trajectories, target_trajs, rewards, distances, followed = [], [], [], [], []
+    trajectories, target_trajs, rewards, distances, followed, action_logs = [], [], [], [], [], []
     env = PointMassEnv()
     for ep in range(num_episodes):
         obs, _ = env.reset()
         agent_path, target_path = [], []
         ep_reward = 0.0
+        ep_action_log = []
         while True:
             agent_path.append(env.state[:3].copy())
             target_path.append(env.target_state[:3].copy())
+
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
+
+            # Log per-step info
+            distance = info.get('distance', np.nan)
+            behind_flag = env._is_behind()
+            action_str = (
+                f"delta_v: {action[0]:.3f}, "
+                f"delta_yaw: {action[1]:.3f}, "
+                f"delta_pitch: {action[2]:.3f}"
+            )
+            ep_action_log.append({
+                'distance': distance,
+                'behind': behind_flag,
+                'reward': reward,
+                'action_str': action_str
+            })
+
             ep_reward += reward
             if terminated or truncated:
                 agent_path.append(env.state[:3].copy())
@@ -39,9 +58,11 @@ def evaluate_model(model, num_episodes=10):
                 distances.append(info.get('distance', np.nan))
                 followed.append(info.get('followed', np.nan))
                 break
+
         trajectories.append(np.array(agent_path))
         target_trajs.append(np.array(target_path))
-    return trajectories, target_trajs, rewards, distances, followed
+        action_logs.append(ep_action_log)
+    return trajectories, target_trajs, rewards, distances, followed, action_logs
 
 
 def plot_coordinates(agent_traj, target_traj, title_prefix='Episode', save_dir='plots'):
@@ -128,12 +149,17 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_
 
 model = load_latest_model()
 print("Model loaded successfully.")
+log_std = model.policy.log_std.detach().cpu().numpy()
+std = torch.exp(model.policy.log_std).detach().cpu().numpy()
+print("Log-std per dimensione d’azione:", log_std)
+print("Std per dimensione d’azione:   ", std)
 timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 save_dir = os.path.join('plots', f"sb3_multi_eval_{timestamp}")
 os.makedirs(save_dir, exist_ok=True)
+
 num_ep = 100
 print(f"Evaluating model for {num_ep} episodes...")
-trajectories, target_trajs, rewards, distances, followed = evaluate_model(model, num_ep)
+trajectories, target_trajs, rewards, distances, followed, action_logs = evaluate_model(model, num_ep)
 
 print(f"Average reward: {np.mean(rewards):.2f} | Average following steps: {np.mean(followed):.2f}")
 
@@ -141,6 +167,20 @@ best_idx = int(np.argmax(rewards))
 worst_idx = int(np.argmin(rewards))
 print(f"Best Episode {best_idx+1} | Reward: {rewards[best_idx]:.2f} | Followed target for: {followed[best_idx]}")
 print(f"Worst Episode {worst_idx+1} | Reward: {rewards[worst_idx]:.2f} | Followed target for: {followed[worst_idx]}")
+
+print("Saving action logs for best and worst episodes...")
+for idx, filename in [(best_idx, 'best_actions.txt'), (worst_idx, 'worst_actions.txt')]:
+    filepath = os.path.join(save_dir, filename)
+    with open(filepath, 'w') as f:
+        for i, log in enumerate(action_logs[idx]):
+            behind = 'yes' if log['behind'] else 'no'
+            f.write(
+                f"Step: {i} | "
+                f"Distance: {log['distance']:.3f} | "
+                f"Behind: {behind} | "
+                f"Reward: {log['reward']:.3f} | "
+                f"Action: {log['action_str']}\n"
+            )
 
 print("Plotting coordinate time-series...")
 plot_coordinates(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode', save_dir=save_dir)

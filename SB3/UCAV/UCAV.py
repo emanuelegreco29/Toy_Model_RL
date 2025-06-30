@@ -20,6 +20,9 @@ class UCAV(gym.Env):
         self.target_position = np.array([1000.0, 0.0, 100.0], dtype=np.float32)
         self.target_velocity = np.array([200.0, 0.0, 0.0], dtype=np.float32)  # [m/s]
 
+        # Utile per reward per decremento distanza
+        self.prev_R = None
+
         # Continuous action space
         self.action_space = spaces.Box(
             low=np.array([-2*self.g, -4*self.g, -np.pi/3], dtype=np.float32),
@@ -44,13 +47,13 @@ class UCAV(gym.Env):
             'z_max':     500.0,
             'v_min':     100.0,
             'v_max':     400.0,
-            'sigma_ang': 2.0,      # for angle advantage
-            'sigma_dist': 400.0,   # for distance advantage
+            'sigma_ang': 3.0,      # for angle advantage
+            'sigma_dist': 600.0,   # for distance advantage
             'sigma_alt': 100.0,    # for altitude advantage
             'omega_ang': 1.0,
             'omega_d':   1.0,
             'omega_h':   1.0,
-            'a_thr':     0.4,      # lower advantage threshold
+            'a_thr':     0.2,      # lower advantage threshold
             'b_thr':     0.7       # upper advantage threshold
         }
    
@@ -112,10 +115,17 @@ class UCAV(gym.Env):
 
         # Euler integration
         self.state += np.array([dx, dy, dz, dv, dgamma, dpsi], dtype=np.float32) * self.dt
+        obs = self._get_obs()
 
-        reward = self.total_reward(self._get_obs(), self.reward_params)
+        R = obs[0]
+        rew = 0.0
+        if self.prev_R is not None:
+            rew = self.prev_R - R
+        self.prev_R = R
 
-        return self._get_obs(), reward, False, False, {}
+        reward = self.total_reward(obs, self.reward_params) + 0.1 * rew # add small reward for decreasing distance
+
+        return obs, reward, False, False, {}
     
     def compute_final_reward(self, R, ATA, AA, R_w, phi_w, q_w):
         """

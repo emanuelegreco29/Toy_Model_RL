@@ -29,12 +29,17 @@ class EpisodeLogger:
                 print(f"Episode {n} | Reward: {r:.2f} | Followed for: {f} | Distance: {d:.2f}")
         return True
 
+args = dict(
+    net_arch=[512, 512, 512],
+    log_std_init=-1.0  # std iniziale ≃ exp(-1)=0.37
+)
+
 env = DummyVecEnv([lambda: Monitor(PointMassEnv(K_history = 1))])
 model = PPO(
     "MlpPolicy", env,
-    policy_kwargs=dict(net_arch=[512, 512, 512]),
+    policy_kwargs=args,
     learning_rate=1e-4,
-    ent_coef=0.1,
+    ent_coef=0.01,
     clip_range=0.2,
     n_epochs=20,
     batch_size=512,

@@ -34,6 +34,8 @@ class EpisodeLogger:
                 print(f"Episode {idx} | Reward: {r:.2f} | Status: {status}")
         return True
     
+def lr_schedule(progress): return 3e-4 * (1 - progress) # learning rate schedule
+    
 def make_env():
     def _init():
         return ChaseEnv()
@@ -44,10 +46,10 @@ env = VecMonitor(env)
 
 model = PPO(
     "MlpPolicy", env,
-    policy_kwargs=dict(net_arch=[128, 128]),
-    learning_rate=1e-4,
-    ent_coef=1e-4,
-    clip_range=0.3,
+    policy_kwargs=dict(net_arch=[64, 64]),
+    learning_rate=lr_schedule,
+    ent_coef=1e-3,
+    clip_range=0.2,
     n_epochs=20,
     batch_size=256,
     verbose=0,
