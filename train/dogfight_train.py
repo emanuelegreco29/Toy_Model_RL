@@ -2,6 +2,7 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import datetime
 import torch
 import numpy as np
 from environments.dogfight_env import DogfightParallelEnv
@@ -14,18 +15,18 @@ obs_dim = env.observation_spaces['chaser_0'].shape[0]
 act_dim = env.action_spaces['chaser_0'].shape[0]
 
 # --- Define policies ---
-chaser = CustomActorCritic(obs_dim, act_dim)
+chaser = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
 chaser.load_state_dict(torch.load("policies/policy.pth"))
 for p in chaser.parameters(): p.requires_grad = False
 
-evader = CustomActorCritic(obs_dim, act_dim)
+evader = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
 
 # --- Optimizers and settings ---
-opt_chaser = torch.optim.Adam(chaser.parameters(), lr=1e-4)
-opt_evader  = torch.optim.Adam(evader.parameters(),  lr=1e-4)
+opt_chaser = torch.optim.Adam(chaser.parameters(), lr=3e-4)
+opt_evader  = torch.optim.Adam(evader.parameters(),  lr=3e-4)
 
 gamma, lam       = 0.99, 0.95
-batch_size       = 2000
+batch_size       = 500
 epochs_per_phase = 100    # epochs per agent phase
 cycles           = 4      # number of alternations
 
@@ -45,7 +46,7 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         # Reset env and batch buffers
         obs_dict, _ = env.reset()
         dones = {a: False for a in env.agents}
-        buf_obs, buf_acts, buf_vals, buf_rews, buf_dones = [], [], [], [], []
+        buf_obs, buf_acts, buf_vals, buf_rews, buf_dones, buf_logprobs_old = [], [], [], [], [], []
         steps = 0
 
         while steps < batch_size:
@@ -68,14 +69,25 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
                     buf_obs.append(o.squeeze())
                     buf_acts.append(torch.tensor(a, dtype=torch.float32))
                     buf_vals.append(v.squeeze())
+                    lp_old = dist.log_prob(torch.tensor(a, dtype=torch.float32)).sum()
+                    buf_logprobs_old.append(lp_old)
                 actions[ag] = a
 
             # Step env
             next_obs, rews, dones, infos = env.step(actions)
 
-            # Shaped reward for training agent
-            raw = rews[frozen_id]
-            r = -raw if reward_flip else raw
+            # prendi i termini dal dizionario infos
+            info   = infos[train_id]
+            shaping= info['shaping']
+            wez    = info['wez_step']
+            kill   = info['kill']
+
+            # assegna reward diverso per chaser/evader
+            if train_agent == 'chaser':
+                r = shaping + wez + kill
+            else:  # evader vuole allontanarsi (neg. shaping) ma guadagna bonus sparo
+                r = -shaping + wez + kill
+
             buf_rews.append(torch.tensor(r, dtype=torch.float32))
             buf_dones.append(dones[train_id])
 
@@ -106,6 +118,7 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         val_b = torch.stack(buf_vals)
         rew_b = torch.stack(buf_rews)
         done_b= torch.tensor(buf_dones, dtype=torch.float32)
+        logprob_old_b = torch.stack(buf_logprobs_old)
 
         adv = torch.zeros_like(rew_b)
         lastgaelam = 0
@@ -123,9 +136,27 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         logprob = dist.log_prob(act_b).sum(-1)
         entropy = dist.entropy().sum(-1).mean()
 
-        policy_loss = -(logprob * adv.detach()).mean()
+        # policy_loss = -(logprob * adv.detach()).mean()
+        # value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
+        # loss = policy_loss + 0.5*value_loss - 0.01*entropy
+
+        # --- PPO CLIPPING ---
+        clip_eps = 0.2
+        # normalizziamo gli advantage
+        adv = (adv - adv.mean())/(adv.std() + 1e-8)
+        # nuova logprob
+        mean, log_std, vals = net(obs_b)
+        dist = torch.distributions.Normal(mean, log_std.exp())
+        logprob_new = dist.log_prob(act_b).sum(-1)
+        # ratio e clipped surrogate
+        ratio = torch.exp(logprob_new - logprob_old_b)
+        surr1 = ratio * adv
+        surr2 = torch.clamp(ratio, 1-clip_eps, 1+clip_eps) * adv
+        policy_loss = -torch.min(surr1, surr2).mean()
+        # value loss e entropy rimangono
         value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
-        loss = policy_loss + 0.5*value_loss - 0.01*entropy
+        entropy_loss = -dist.entropy().sum(-1).mean()
+        loss = policy_loss + 0.5*value_loss + 0.01*entropy_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -142,14 +173,18 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         # Save checkpoint every 50 epochs
         state = evader.state_dict() if train_agent=='evader' else chaser.state_dict()
         if ep % 50 == 0:
-            torch.save(state, f"policies/SP/selfplay_{train_agent}_ep{ep}.pth")
+            torch.save(state, f"policies/SP/SelfPlay_{ts}/selfplay_{train_agent}_ep{ep}.pth")
         ep += 1
 
     return ep
 
 # Run alternating training phases
 ep_cursor = 0
+
+# Create directories for saving policies
 os.makedirs("policies/SP", exist_ok=True)
+ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
+os.makedirs(f"policies/SP/SelfPlay_{ts}", exist_ok=True)
 
 # Phase 1: evader trains vs frozen chaser
 ep_cursor = run_phase('evader', 'chaser_0', opt_evader, reward_flip=False, start_ep=ep_cursor)
