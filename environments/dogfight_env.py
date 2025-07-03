@@ -169,7 +169,7 @@ class DogfightParallelEnv(ParallelEnv):
         done = False
         for ag in self.agents:
             # base reward
-            r = self._compute_reward(ag)
+            shaping = self._compute_reward(ag)
             
             # behind tracking
             if self._is_behind(ag):
@@ -181,27 +181,36 @@ class DogfightParallelEnv(ParallelEnv):
             # WEZ steps
             if self._in_wez(ag):
                 self.wez_steps[ag] += 1
-                r += self.wez_step
+                wez = self.wez_step
             else:
                 self.wez_steps[ag] = 0
+                wez = 0.0
                 
             # hit resolution
             if self.wez_steps[ag] >= 5 and not self.destroyed[self._other(ag)]:
                 # Deal damage to the opponent
                 self.hp[self._other(ag)] = max(self.hp[self._other(ag)] - self.hp_decrement, 0)
-                r += self.wez_reward
+                shaping += self.wez_reward
                 self.wez_steps[ag] = 0
                 if self.hp[self._other(ag)] <= 0:
                     self.destroyed[self._other(ag)] = True
-                    r += self.destroy_bonus
+                    kill = self.destroy_bonus
+                else:
+                    kill = 0.0
+            else:
+                kill = 0.0
                     
+            r = shaping + wez + kill
             rewards[ag] = r
             
             # info dict
             infos[ag] = {
                 'distance': float(np.linalg.norm(self.states[ag][:3] - self.states[self._other(ag)][:3])),
                 'followed': int(self.total_behind[ag]),
-                'target_destroyed': self.destroyed[self._other(ag)]
+                'target_destroyed': self.destroyed[self._other(ag)],
+                'shaping': float(shaping),
+                'wez_step': wez,
+                'kill': kill,
             }
             if self.destroyed[self._other(ag)] or self.current_step >= self.max_steps:
                 done = True
