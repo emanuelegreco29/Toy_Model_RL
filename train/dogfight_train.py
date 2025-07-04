@@ -134,7 +134,10 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         mean, log_std, vals = net(obs_b)
         dist = torch.distributions.Normal(mean, log_std.exp())
         logprob = dist.log_prob(act_b).sum(-1)
-        entropy = dist.entropy().sum(-1).mean()
+        entropy = dist.entropy().sum(-1).mean().item()
+
+        print(f"Entropy: {entropy:.4f}")
+        print(f"[Phase {train_agent}] Avg Raw Reward: {torch.stack(buf_rews).mean().item():.4f}")
 
         # policy_loss = -(logprob * adv.detach()).mean()
         # value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
@@ -156,10 +159,22 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         # value loss e entropy rimangono
         value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
         entropy_loss = -dist.entropy().sum(-1).mean()
-        loss = policy_loss + 0.5*value_loss + 0.01*entropy_loss
+        entropy_coef = 0.1 if train_agent=='chaser' else 0.01
+        loss = policy_loss + 0.5*value_loss + entropy_coef*entropy_loss
+
+        print(f"[Adv mean {adv.mean().item():.4f}, std {adv.std().item():.4f}")
 
         optimizer.zero_grad()
         loss.backward()
+
+        # Logging
+        total_norm = 0
+        for p in net.parameters():
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        print(f"Grad Norm: {total_norm:.4f}")
+
         optimizer.step()
 
         # Logging each epoch
