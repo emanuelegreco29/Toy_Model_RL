@@ -7,12 +7,11 @@ import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 from mpl_toolkits.mplot3d import Axes3D
 
 from environments.dogfight_env import DogfightParallelEnv
 from algorithms.PPO.custom_ppo import CustomActorCritic
-
 
 def load_latest_policies(base_dir='policies/SP'):
     folders = glob.glob(os.path.join(base_dir, 'SelfPlay_*'))
@@ -25,7 +24,6 @@ def load_latest_policies(base_dir='policies/SP'):
     if not ch_files or not ev_files:
         raise FileNotFoundError("Policy files not found in the latest SelfPlay folder")
     return max(ch_files, key=os.path.getmtime), max(ev_files, key=os.path.getmtime)
-
 
 def evaluate_policies(chaser_net, evader_net, env, num_episodes=100):
     trajectories, target_trajs, rewards, final_hps, hit_list = [], [], [], [], []
@@ -42,7 +40,8 @@ def evaluate_policies(chaser_net, evader_net, env, num_episodes=100):
             actions = {}
             for name, net in [('chaser_0', chaser_net), ('evader_0', evader_net)]:
                 tensor_obs = torch.tensor(obs[name], dtype=torch.float32).unsqueeze(0)
-                with torch.no_grad(): mean, log_std, _ = net(tensor_obs)
+                with torch.no_grad():
+                    mean, log_std, _ = net(tensor_obs)
                 actions[name] = mean.squeeze().numpy()
             next_obs, rews, dones, _ = env.step(actions)
             total_reward += rews['chaser_0']
@@ -60,77 +59,87 @@ def evaluate_policies(chaser_net, evader_net, env, num_episodes=100):
         hit_list.append(hits)
     return trajectories, target_trajs, rewards, final_hps, hit_list
 
+def plot_coordinates(agent_traj, target_traj, hit_indices, title_prefix, save_dir):
+    coords = ['X', 'Y', 'Z']
+    for i, label in enumerate(coords):
+        plt.figure()
+        plt.plot(agent_traj[:, i], label='Chaser')
+        plt.plot(target_traj[:, i], label='Evader', linestyle='--')
+        if hit_indices:
+            plt.scatter(hit_indices, target_traj[hit_indices, i], marker='x', label='Hit')
+        plt.xlabel('Timestep')
+        plt.ylabel(f'{label}(t)')
+        plt.title(f'{title_prefix} - {label}(t)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f'{title_prefix}_{label}.png'))
+        plt.close()
 
-def plot_3d(agent_traj, target_traj, hit_indices, prefix, save_dir):
+def animate_with_wez(agent_traj, target_traj, filename, save_dir, pad=1.0):
+    # assumiamo che DogfightParallelEnv esponga wez_length e wez_angle
+    env_params = DogfightParallelEnv()
+    wez_length = getattr(env_params, 'wez_length', getattr(env_params, 'wez_radius', 1000.0))
+    wez_angle = getattr(env_params, 'wez_angle', np.pi/6)
+
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    # plot only XYZ coords
-    ax.plot(agent_traj[:,0], agent_traj[:,1], agent_traj[:,2], 'b-', label='Chaser')
-    ax.plot(target_traj[:,0], target_traj[:,1], target_traj[:,2], 'r--', label='Evader')
-    if hit_indices:
-        pts = target_traj[hit_indices, :3]
-        ax.scatter(pts[:,0], pts[:,1], pts[:,2], c='k', marker='x', label='Hit')
+
+    agent_line, = ax.plot([], [], [], lw=2, label='Chaser')
+    target_line, = ax.plot([], [], [], lw=2, linestyle='--', label='Evader')
+    boundary1, = ax.plot([], [], [], lw=1, alpha=0.7, label='WEZ Edge')
+    boundary2, = ax.plot([], [], [], lw=1, alpha=0.7)
+
     ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-    ax.set_title(f'{prefix} - 3D Trajectory')
-    ax.legend(); plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f'{prefix}_3d.png'))
-    plt.close()
+    ax.legend()
 
+    def update(num):
+        agent = agent_traj[num]
+        target = target_traj[num]
+        # traiettorie
+        agent_line.set_data(agent_traj[:num+1,0], agent_traj[:num+1,1])
+        agent_line.set_3d_properties(agent_traj[:num+1,2])
+        target_line.set_data(target_traj[:num+1,0], target_traj[:num+1,1])
+        target_line.set_3d_properties(target_traj[:num+1,2])
 
-def animate_3d(agent_traj, target_traj, hit_indices, wez_radius, prefix, save_dir):
-    # extract only XYZ coords
-    a_xyz = agent_traj[:, :3]
-    e_xyz = target_traj[:, :3]
-    # prepare sphere offsets for WEZ
-    u, v = np.mgrid[0:2*np.pi:30j, 0:np.pi:15j]
-    sphere_offsets = np.stack((np.cos(u)*np.sin(v), np.sin(u)*np.sin(v), np.cos(v)), axis=-1)
-    sphere_offsets = sphere_offsets.reshape(-1,3) * wez_radius
+        # margini WEZ a wedge
+        yaw = agent[4]
+        pitch = agent[5]
+        left = np.array([
+            np.cos(pitch)*np.cos(yaw + wez_angle),
+            np.cos(pitch)*np.sin(yaw + wez_angle),
+            np.sin(pitch)
+        ]) * wez_length
+        right = np.array([
+            np.cos(pitch)*np.cos(yaw - wez_angle),
+            np.cos(pitch)*np.sin(yaw - wez_angle),
+            np.sin(pitch)
+        ]) * wez_length
+        p1 = agent[:3] + left
+        p2 = agent[:3] + right
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    # set limits based on positions
-    all_pts = np.vstack((a_xyz, e_xyz))
-    mins, maxs = all_pts.min(axis=0), all_pts.max(axis=0)
-    ax.set_xlim(mins[0]-wez_radius, maxs[0]+wez_radius)
-    ax.set_ylim(mins[1]-wez_radius, maxs[1]+wez_radius)
-    ax.set_zlim(mins[2]-wez_radius, maxs[2]+wez_radius)
+        boundary1.set_data([agent[0], p1[0]], [agent[1], p1[1]])
+        boundary1.set_3d_properties([agent[2], p1[2]])
+        boundary2.set_data([agent[0], p2[0]], [agent[1], p2[1]])
+        boundary2.set_3d_properties([agent[2], p2[2]])
 
-    line_c, = ax.plot([], [], [], 'b-', label='Chaser')
-    line_e, = ax.plot([], [], [], 'r--', label='Evader')
-    scatter_h, = ax.plot([], [], [], marker='x', linestyle='None', color='k', label='Hit')
-    scatter_w = ax.scatter([], [], [], c='gray', alpha=0.3, s=1, label='WEZ')
-    ax.set_title(f'{prefix} - 3D Animation'); ax.legend()
+        # limiti dinamici
+        mins = np.minimum(agent[:3], target[:3]) - pad
+        maxs = np.maximum(agent[:3], target[:3]) + pad
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
 
-    def init():
-        line_c.set_data([], []); line_c.set_3d_properties([])
-        line_e.set_data([], []); line_e.set_3d_properties([])
-        scatter_h.set_data([], []); scatter_h.set_3d_properties([])
-        scatter_w._offsets3d = ([], [], [])
-        return line_c, line_e, scatter_h, scatter_w
+        return agent_line, target_line, boundary1, boundary2
 
-    def update(frame):
-        # update trajectories
-        line_c.set_data(a_xyz[:frame,0], a_xyz[:frame,1])
-        line_c.set_3d_properties(a_xyz[:frame,2])
-        line_e.set_data(e_xyz[:frame,0], e_xyz[:frame,1])
-        line_e.set_3d_properties(e_xyz[:frame,2])
-        # update hits
-        curr_hits = [h for h in hit_indices if h < frame]
-        if curr_hits:
-            pts = e_xyz[curr_hits]
-            scatter_h.set_data(pts[:,0], pts[:,1]); scatter_h.set_3d_properties(pts[:,2])
-        # update WEZ sphere
-        center = e_xyz[frame]
-        sph = sphere_offsets + center
-        scatter_w._offsets3d = (sph[:,0], sph[:,1], sph[:,2])
-        return line_c, line_e, scatter_h, scatter_w
-
-    anim = FuncAnimation(fig, update, init_func=init, frames=len(a_xyz), blit=True)
-    out_path = os.path.join(save_dir, f'{prefix}_3d_anim.mp4')
-    anim.save(out_path, fps=30, dpi=200)
+    filepath = os.path.join(save_dir, filename)
+    ani = FuncAnimation(fig, update, frames=len(agent_traj), interval=200, blit=False)
+    ani.save(filepath, writer=PillowWriter(fps=5))
     plt.close()
 
 # === Main Evaluation Script ===
+
+# Caricamento policy
 chaser_path, evader_path = load_latest_policies()
 env = DogfightParallelEnv(K_history=1)
 obs_dim = env.observation_spaces['chaser_0'].shape[0]
@@ -142,30 +151,32 @@ evader_net = CustomActorCritic(obs_dim, act_dim)
 evader_net.load_state_dict(torch.load(evader_path, map_location='cpu'))
 for p in evader_net.parameters(): p.requires_grad=False
 
+# Cartelle di output
 timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 save_dir = os.path.join('plots', f'eval_selfplay_{timestamp}')
 os.makedirs(save_dir, exist_ok=True)
 
+# Valutazione
 print('Evaluating policies for 100 episodes...')
-trajectories, target_trajs, rewards, final_hps, hit_indices_list = evaluate_policies(
+trajectories, target_trajs, rewards, final_hps, hits = evaluate_policies(
     chaser_net, evader_net, env, num_episodes=100
 )
 
+# Selezione best/worst
 min_hp, max_hp = min(final_hps), max(final_hps)
 best_idx = max([i for i,hp in enumerate(final_hps) if hp==min_hp], key=lambda i: rewards[i])
 worst_idx = min([i for i,hp in enumerate(final_hps) if hp==max_hp], key=lambda i: rewards[i])
-
 print(f'Best Episode {best_idx+1} | Final HP: {final_hps[best_idx]} | Reward: {rewards[best_idx]:.2f}')
 print(f'Worst Episode {worst_idx+1} | Final HP: {final_hps[worst_idx]} | Reward: {rewards[worst_idx]:.2f}')
 
-# Static 3D
-plot_3d(trajectories[best_idx], target_trajs[best_idx], hit_indices_list[best_idx], f'Best_{best_idx+1}', save_dir)
-plot_3d(trajectories[worst_idx], target_trajs[worst_idx], hit_indices_list[worst_idx], f'Worst_{worst_idx+1}', save_dir)
+# Plot coordinate nel tempo
+print("Plotting coordinate time-series with hit points...")
+plot_coordinates(trajectories[best_idx], target_trajs[best_idx], hits[best_idx], 'Best_Episode', save_dir)
+plot_coordinates(trajectories[worst_idx], target_trajs[worst_idx], hits[worst_idx], 'Worst_Episode', save_dir)
 
-# Animate 3D with hits and WEZ
-wez_radius = getattr(env, 'wez_radius', 1000.0)
-print('Animating 3D trajectories with WEZ...')
-animate_3d(trajectories[best_idx], target_trajs[best_idx], hit_indices_list[best_idx], wez_radius, f'Best_{best_idx+1}', save_dir)
-animate_3d(trajectories[worst_idx], target_trajs[worst_idx], hit_indices_list[worst_idx], wez_radius, f'Worst_{worst_idx+1}', save_dir)
+# Animazioni WEZ
+print("Creating animations with WEZ...")
+animate_with_wez(trajectories[best_idx], target_trajs[best_idx], 'best_episode.gif', save_dir)
+animate_with_wez(trajectories[worst_idx], target_trajs[worst_idx], 'worst_episode.gif', save_dir)
 
-print(f'All 3D plots and animations saved to {save_dir}')
+print(f'Plots and animations saved in {save_dir}')

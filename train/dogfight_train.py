@@ -17,20 +17,22 @@ act_dim = env.action_spaces['chaser_0'].shape[0]
 # --- Define policies ---
 chaser = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
 chaser.load_state_dict(torch.load("policies/policy.pth"))
-for p in chaser.parameters(): p.requires_grad = False
+for p in chaser.parameters(): p.requires_grad = True
 
 evader = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
+evader.load_state_dict(torch.load("policies/selfplay_evader_ep450.pth"))
+for p in evader.parameters(): p.requires_grad = False
 
 # --- Optimizers and settings ---
 opt_chaser = torch.optim.Adam(chaser.parameters(), lr=3e-4)
 opt_evader  = torch.optim.Adam(evader.parameters(),  lr=3e-4)
 
 gamma, lam       = 0.99, 0.95
-batch_size       = 500
-epochs_per_phase = 100    # epochs per agent phase
-cycles           = 4      # number of alternations
+batch_size       = 4096
+epochs_per_phase = 20    # epochs per agent phase
+cycles           = 50      # number of alternations
 
-def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
+def run_phase(train_agent, frozen_agent, optimizer, start_ep):
     ep = start_ep
     train_id = f"{train_agent}_0"
     frozen_id = frozen_agent
@@ -55,7 +57,10 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
             for ag in env.agents:
                 o = torch.tensor(obs_dict[ag], dtype=torch.float32).unsqueeze(0)
                 if ag == frozen_id:
-                    net = chaser
+                    if frozen_id == 'chaser_0':
+                        net = chaser
+                    else: # frozen_id == 'evader_0'
+                        net = evader
                     with torch.no_grad():
                         mean, log_std, _ = net(o)
                         dist = torch.distributions.Normal(mean, log_std.exp())
@@ -77,16 +82,12 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
             next_obs, rews, dones, infos = env.step(actions)
 
             # prendi i termini dal dizionario infos
-            info   = infos[train_id]
-            shaping= info['shaping']
-            wez    = info['wez_step']
-            kill   = info['kill']
+            # info   = infos[train_id]
+            # shaping= info['shaping']
+            # wez    = info['wez_step']
+            # kill   = info['kill']
 
-            # assegna reward diverso per chaser/evader
-            if train_agent == 'chaser':
-                r = shaping + wez + kill
-            else:  # evader vuole allontanarsi (neg. shaping) ma guadagna bonus sparo
-                r = -shaping + wez + kill
+            r = rews[train_id]
 
             buf_rews.append(torch.tensor(r, dtype=torch.float32))
             buf_dones.append(dones[train_id])
@@ -137,7 +138,7 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         entropy = dist.entropy().sum(-1).mean().item()
 
         print(f"Entropy: {entropy:.4f}")
-        print(f"[Phase {train_agent}] Avg Raw Reward: {torch.stack(buf_rews).mean().item():.4f}")
+        #print(f"[Phase {train_agent}] Avg Raw Reward: {torch.stack(buf_rews).mean().item():.4f}")
 
         # policy_loss = -(logprob * adv.detach()).mean()
         # value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
@@ -159,10 +160,10 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         # value loss e entropy rimangono
         value_loss  = (returns.detach() - vals.squeeze()).pow(2).mean()
         entropy_loss = -dist.entropy().sum(-1).mean()
-        entropy_coef = 0.1 if train_agent=='chaser' else 0.01
+        entropy_coef = 0.2
         loss = policy_loss + 0.5*value_loss + entropy_coef*entropy_loss
 
-        print(f"[Adv mean {adv.mean().item():.4f}, std {adv.std().item():.4f}")
+        #print(f"[Adv mean {adv.mean().item():.4f}, std {adv.std().item():.4f}")
 
         optimizer.zero_grad()
         loss.backward()
@@ -183,11 +184,11 @@ def run_phase(train_agent, frozen_agent, optimizer, reward_flip, start_ep):
         avg_len    = np.mean(episode_lengths) if episode_lengths else curr_length
         
         print(f"[{train_agent} ep {ep}] loss {loss.item():.3f}, ")
-        print(f"  avg_reward {avg_reward:.2f}, avg_final_hp {avg_hp:.1f}, avg_len {avg_len:.1f}")
+        print(f"Avg. Reward: {avg_reward:.2f} | Avg. Final HP: {avg_hp:.1f} | Avg. Lenght: {avg_len:.1f}")
 
         # Save checkpoint every 50 epochs
         state = evader.state_dict() if train_agent=='evader' else chaser.state_dict()
-        if ep % 50 == 0:
+        if ep % 10 == 0:
             torch.save(state, f"policies/SP/SelfPlay_{ts}/selfplay_{train_agent}_ep{ep}.pth")
         ep += 1
 
@@ -202,23 +203,27 @@ ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 os.makedirs(f"policies/SP/SelfPlay_{ts}", exist_ok=True)
 
 # Phase 1: evader trains vs frozen chaser
-ep_cursor = run_phase('evader', 'chaser_0', opt_evader, reward_flip=False, start_ep=ep_cursor)
+#ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
+ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
 
 # Phase 2: freeze evader, train chaser vs frozen evader
-for p in evader.parameters(): p.requires_grad = False
-for p in chaser.parameters(): p.requires_grad = True
-ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, reward_flip=False, start_ep=ep_cursor)
+# for p in evader.parameters(): p.requires_grad = False
+# for p in chaser.parameters(): p.requires_grad = True
+# ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
+for p in evader.parameters():   p.requires_grad = True
+for p in chaser.parameters():  p.requires_grad = False
+ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
 
 # Further alternations
 for cycle in range(1, cycles):
-    # evader phase
-    for p in evader.parameters(): p.requires_grad = True
-    for p in chaser.parameters(): p.requires_grad = False
-    ep_cursor = run_phase('evader', 'chaser_0', opt_evader, reward_flip=False, start_ep=ep_cursor)
-    
     # chaser phase
     for p in evader.parameters(): p.requires_grad = False
     for p in chaser.parameters(): p.requires_grad = True
-    ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, reward_flip=False, start_ep=ep_cursor)
+    ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
+
+    # evader phase
+    for p in evader.parameters(): p.requires_grad = True
+    for p in chaser.parameters(): p.requires_grad = False
+    ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
 
 print("Self-play training completed.")

@@ -168,8 +168,6 @@ class DogfightParallelEnv(ParallelEnv):
         # 2) Compute rewards, WEZ, HP, dones
         done = False
         for ag in self.agents:
-            # base reward
-            shaping = self._compute_reward(ag)
             
             # behind tracking
             if self._is_behind(ag):
@@ -181,41 +179,25 @@ class DogfightParallelEnv(ParallelEnv):
             # WEZ steps
             if self._in_wez(ag):
                 self.wez_steps[ag] += 1
-                wez = self.wez_step
             else:
                 self.wez_steps[ag] = 0
-                wez = 0.0
-                
-            # hit resolution
-            if self.wez_steps[ag] >= 5 and not self.destroyed[self._other(ag)]:
-                # Deal damage to the opponent
-                self.hp[self._other(ag)] = max(self.hp[self._other(ag)] - self.hp_decrement, 0)
-                shaping += self.wez_reward
-                self.wez_steps[ag] = 0
-                if self.hp[self._other(ag)] <= 0:
-                    self.destroyed[self._other(ag)] = True
-                    kill = self.destroy_bonus
-                else:
-                    kill = 0.0
-            else:
-                kill = 0.0
-                    
-            r = shaping + wez + kill
-            rewards[ag] = r
             
-            # info dict
+            # Assegna le ricompense
+            if ag == 'chaser_0':
+                rewards[ag] = self._compute_reward_chaser(ag)
+            else: # evader_0
+                rewards[ag] = self._compute_reward_evader(ag)
+
             infos[ag] = {
                 'distance': float(np.linalg.norm(self.states[ag][:3] - self.states[self._other(ag)][:3])),
                 'followed': int(self.total_behind[ag]),
                 'target_destroyed': self.destroyed[self._other(ag)],
-                'shaping': float(shaping),
-                'wez_step': wez,
-                'kill': kill,
             }
+
             if self.destroyed[self._other(ag)] or self.current_step >= self.max_steps:
                 done = True
                 infos[ag]['final_hp'] = int(self.hp[self._other(ag)])
-
+        
         dones = {ag: done for ag in self.agents}
         obs = {ag: self._get_obs(ag) for ag in self.agents}
         
@@ -224,7 +206,7 @@ class DogfightParallelEnv(ParallelEnv):
     def _other(self, agent):
         return self.agents[1] if agent == self.agents[0] else self.agents[0]
 
-    def _compute_reward(self, agent):
+    def _compute_reward_evader(self, agent):
         st = self.states[agent]
         other = self.states[self._other(agent)]
         
@@ -253,6 +235,57 @@ class DogfightParallelEnv(ParallelEnv):
         f_head_vel = (1 + cos_vel) / 2
         
         return (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
+    
+    def _compute_reward_chaser(self, agent):
+        st    = self.states[agent]
+        other = self.states[self._other(agent)]
+        
+        vec    = st[:3] - other[:3]
+        d3     = np.linalg.norm(vec) + 1e-8
+        f_dist = np.exp(-0.5 * (d3 / 10) ** 1)
+        
+        ux, uy, uz     = vec / d3
+        position_vec   = np.array([ux, uy, uz])
+        yaw, pitch     = st[4], st[5]
+        dx = math.cos(pitch) * math.cos(yaw)
+        dy = math.cos(pitch) * math.sin(yaw)
+        dz = math.sin(pitch)
+        direction_vec = np.array([dx, dy, dz])
+        
+        target_dir = self._get_target_direction(agent)
+        cos_vel = np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0)
+        cos_pos = np.clip(np.dot(position_vec,  target_dir), -1.0, 1.0)
+        f_head_pos = (1 - cos_pos) / 2
+        f_head_vel = (1 + cos_vel) / 2
+        
+        base_reward = (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
+
+        # 2) WEZ steps
+        if self._in_wez(agent):
+            wez = self.wez_step
+        else:
+            wez = 0.0
+
+        # 3) HP and kill bonus
+        if self.wez_steps[agent] >= 5 and not self.destroyed[self._other(agent)]:
+            # sottrai HP all'avversario
+            opp = self._other(agent)
+            self.hp[opp] = max(self.hp[opp] - self.hp_decrement, 0)
+            shaping = self.wez_reward
+            self.wez_steps[agent] = 0
+
+            # se HP <= 0, kill bonus
+            if self.hp[opp] <= 0:
+                self.destroyed[opp] = True
+                kill = self.destroy_bonus
+            else:
+                kill = 0.0
+        else:
+            shaping = 0.0
+            kill    = 0.0
+
+        # 4) reward totale
+        return base_reward + wez + shaping + kill
 
     def _in_wez(self, agent):
         st = self.states[agent]
