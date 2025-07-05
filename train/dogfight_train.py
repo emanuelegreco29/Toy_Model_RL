@@ -17,11 +17,10 @@ act_dim = env.action_spaces['chaser_0'].shape[0]
 # --- Define policies ---
 chaser = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
 chaser.load_state_dict(torch.load("policies/policy.pth"))
-for p in chaser.parameters(): p.requires_grad = True
+for p in chaser.parameters(): p.requires_grad = False
 
 evader = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
-evader.load_state_dict(torch.load("policies/selfplay_evader_ep450.pth"))
-for p in evader.parameters(): p.requires_grad = False
+for p in evader.parameters(): p.requires_grad = True
 
 # --- Optimizers and settings ---
 opt_chaser = torch.optim.Adam(chaser.parameters(), lr=3e-4)
@@ -30,7 +29,7 @@ opt_evader  = torch.optim.Adam(evader.parameters(),  lr=3e-4)
 gamma, lam       = 0.99, 0.95
 batch_size       = 4096
 epochs_per_phase = 20    # epochs per agent phase
-cycles           = 50      # number of alternations
+cycles           = 25      # number of alternations
 
 def run_phase(train_agent, frozen_agent, optimizer, start_ep):
     ep = start_ep
@@ -203,27 +202,23 @@ ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 os.makedirs(f"policies/SP/SelfPlay_{ts}", exist_ok=True)
 
 # Phase 1: evader trains vs frozen chaser
-#ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
-ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
+ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
 
 # Phase 2: freeze evader, train chaser vs frozen evader
-# for p in evader.parameters(): p.requires_grad = False
-# for p in chaser.parameters(): p.requires_grad = True
-# ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
-for p in evader.parameters():   p.requires_grad = True
-for p in chaser.parameters():  p.requires_grad = False
-ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
+for p in evader.parameters(): p.requires_grad = False
+for p in chaser.parameters(): p.requires_grad = True
+ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
 
 # Further alternations
 for cycle in range(1, cycles):
-    # chaser phase
-    for p in evader.parameters(): p.requires_grad = False
-    for p in chaser.parameters(): p.requires_grad = True
-    ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
-
     # evader phase
     for p in evader.parameters(): p.requires_grad = True
     for p in chaser.parameters(): p.requires_grad = False
     ep_cursor = run_phase('evader', 'chaser_0', opt_evader, start_ep=ep_cursor)
+
+    # chaser phase
+    for p in evader.parameters(): p.requires_grad = False
+    for p in chaser.parameters(): p.requires_grad = True
+    ep_cursor = run_phase('chaser', 'evader_0', opt_chaser, start_ep=ep_cursor)
 
 print("Self-play training completed.")
