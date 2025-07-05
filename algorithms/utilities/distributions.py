@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.distributions as dist
+import numpy as np
 
 class DiagGaussianDistribution:
     """
@@ -45,6 +46,9 @@ class DiagGaussianDistribution:
         Returns:
             self for method chaining
         """
+        # Clamp log_std to avoid numerical issues
+        log_std = torch.clamp(log_std, min=-20, max=2)
+        
         # Create standard deviation from log_std
         std = torch.exp(log_std)
         
@@ -68,10 +72,12 @@ class DiagGaussianDistribution:
         """
         if self.distribution is None:
             raise ValueError("Distribution not initialized. Call proba_distribution first.")
-            
+        
         # Get log prob for each action dimension and sum
         log_prob = self.distribution.log_prob(actions)
-        return log_prob.sum(dim=-1, keepdim=True)
+        
+        # Sum over action dimensions but keep batch dimension
+        return log_prob.sum(dim=-1)
     
     def entropy(self) -> torch.Tensor:
         """
@@ -82,8 +88,9 @@ class DiagGaussianDistribution:
         """
         if self.distribution is None:
             raise ValueError("Distribution not initialized. Call proba_distribution first.")
-            
-        return self.distribution.entropy().sum(dim=-1, keepdim=True)
+        
+        # Sum over action dimensions but keep batch dimension
+        return self.distribution.entropy().sum(dim=-1)
     
     def sample(self) -> torch.Tensor:
         """
@@ -108,3 +115,76 @@ class DiagGaussianDistribution:
             raise ValueError("Distribution not initialized. Call proba_distribution first.")
             
         return self.distribution.mean
+    
+    def rsample(self) -> torch.Tensor:
+        """
+        Sample actions from the distribution using reparameterization trick
+        
+        Returns:
+            Sampled actions with gradients
+        """
+        if self.distribution is None:
+            raise ValueError("Distribution not initialized. Call proba_distribution first.")
+            
+        return self.distribution.rsample()
+    
+    def get_actions(self, deterministic: bool = False) -> torch.Tensor:
+        """
+        Get actions from the distribution
+        
+        Args:
+            deterministic: Whether to use deterministic actions (mode) or sample
+            
+        Returns:
+            Actions
+        """
+        if deterministic:
+            return self.mode()
+        else:
+            return self.sample()
+    
+    def actions_from_params(self, mean_actions: torch.Tensor, log_std: torch.Tensor, 
+                          deterministic: bool = False) -> torch.Tensor:
+        """
+        Sample actions from distribution parameters
+        
+        Args:
+            mean_actions: Mean of actions
+            log_std: Log standard deviation
+            deterministic: Whether to use deterministic actions
+            
+        Returns:
+            Actions
+        """
+        self.proba_distribution(mean_actions, log_std)
+        return self.get_actions(deterministic)
+    
+    def log_prob_from_params(self, mean_actions: torch.Tensor, log_std: torch.Tensor, 
+                           actions: torch.Tensor) -> torch.Tensor:
+        """
+        Get log probability from distribution parameters
+        
+        Args:
+            mean_actions: Mean of actions
+            log_std: Log standard deviation
+            actions: Actions to evaluate
+            
+        Returns:
+            Log probabilities
+        """
+        self.proba_distribution(mean_actions, log_std)
+        return self.log_prob(actions)
+    
+    def entropy_from_params(self, mean_actions: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
+        """
+        Get entropy from distribution parameters
+        
+        Args:
+            mean_actions: Mean of actions
+            log_std: Log standard deviation
+            
+        Returns:
+            Entropy
+        """
+        self.proba_distribution(mean_actions, log_std)
+        return self.entropy()

@@ -11,22 +11,26 @@ class CustomActorCritic(nn.Module):
                  obs_dim: int, 
                  act_dim: int, 
                  net_arch: Tuple[int, ...] = (512, 512, 512), 
-                 log_std_init: float = -1.5,
+                 log_std_init: float = -2.0,
                  device: str = "cpu"):
         super().__init__()
+        
+        # Fix device handling
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
         
         # 1) Feature extractor (Flatten Layer)
         self.features_extractor = nn.Flatten()
         self.features_dim = obs_dim
-        
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # 2) Custom MLP extractor: separa policy e value networks
         self.mlp_extractor = CustomMlpExtractor(
             feature_dim=self.features_dim,
             net_arch={"pi": list(net_arch), "vf": list(net_arch)},
             activation_fn=nn.Tanh,
-            device=device,
+            device=str(self.device),
         )
         
         # 3) Action dimension per la distribuzione
@@ -46,6 +50,9 @@ class CustomActorCritic(nn.Module):
         
         # 7) Inizializzazione ortogonale dei pesi
         self._init_weights()
+        
+        # Move to device
+        self.to(self.device)
     
     def _init_weights(self):
         """Inizializzazione ortogonale dei pesi"""
@@ -60,9 +67,16 @@ class CustomActorCritic(nn.Module):
         self.mlp_extractor.apply(init_mlp_weights)
         
         # Action net (policy head) - gain piccolo per stabilità
+        nn.init.orthogonal_(self.action_net.weight, gain=0.01)
+        nn.init.constant_(self.action_net.bias, 0.0)
+        
         # Value net - gain standard
         nn.init.orthogonal_(self.value_net.weight, gain=1.0)
         nn.init.constant_(self.value_net.bias, 0.0)
+    
+    def _get_tensors_on_device(self, *tensors):
+        """Ensure tensors are on the correct device"""
+        return [t.to(self.device) if isinstance(t, torch.Tensor) else t for t in tensors]
     
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -76,6 +90,8 @@ class CustomActorCritic(nn.Module):
             log_std: (act_dim,) - parametro della rete
             values: (batch_size, 1)
         """
+        obs = obs.to(self.device)
+        
         # Estrazione features
         features = self.features_extractor(obs)
         
@@ -129,6 +145,8 @@ class CustomActorCritic(nn.Module):
             log_prob: Log probabilities of actions
             entropy: Entropy of the action distribution
         """
+        obs, actions = self._get_tensors_on_device(obs, actions)
+        
         mean_actions, log_std, values = self.forward(obs)
         
         # Configura la distribuzione
@@ -152,6 +170,8 @@ class CustomActorCritic(nn.Module):
             actions: Predicted actions
             values: Predicted values
         """
+        obs = obs.to(self.device)
+        
         mean_actions, log_std, values = self.forward(obs)
         
         # Configura la distribuzione
@@ -176,5 +196,6 @@ class CustomActorCritic(nn.Module):
         Returns:
             log_prob: Log probabilities
         """
+        obs, actions = self._get_tensors_on_device(obs, actions)
         distribution = self.get_distribution(obs)
         return distribution.log_prob(actions)
