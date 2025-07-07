@@ -39,7 +39,20 @@ class DogfightParallelEnv(ParallelEnv):
         obs_dim = 18
         low = -np.inf * np.ones(obs_dim, dtype=np.float32)
         high =  np.inf * np.ones(obs_dim, dtype=np.float32)
-        self.observation_spaces = {a: spaces.Box(low, high, dtype=np.float32) for a in self.agents}
+        self.observation_spaces = {a: spaces.Box(low, high, dtype=np.float32)
+                                   for a in self.agents}
+
+        # centralized‐critic
+        local_dim  = self.observation_spaces[self.agents[0]].shape[0]
+        global_dim = local_dim * len(self.agents)
+        self.global_state_space = spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(global_dim,), dtype=np.float32
+        )
+
+        # espongo observation_space come dict per train‐loop
+        self.observation_space = dict(self.observation_spaces)
+        self.observation_space['global_state'] = self.global_state_space
         
         # Action space: dv, dyaw, dpitch
         act_low = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
@@ -112,7 +125,11 @@ class DogfightParallelEnv(ParallelEnv):
             self.total_behind[agent]     = 0
             self.destroyed[agent]        = False
         
-        return {agent: self._get_obs(agent) for agent in self.agents}, {}
+        obs = {agent: self._get_obs(agent) for agent in self.agents}
+        global_state = np.concatenate([obs[a] for a in self.agents], axis=0)
+        infos = {agent: {'global_state': global_state.copy()} for agent in self.agents}
+
+        return obs, infos
 
     def _get_obs(self, agent):
         # Own and opponent
@@ -200,7 +217,10 @@ class DogfightParallelEnv(ParallelEnv):
         
         dones = {ag: done for ag in self.agents}
         obs = {ag: self._get_obs(ag) for ag in self.agents}
-        
+        global_state = np.concatenate([obs[a] for a in self.agents], axis=0)
+        for ag in self.agents:
+            infos[ag]['global_state'] = global_state.copy()
+
         return obs, rewards, dones, infos
 
     def _other(self, agent):
