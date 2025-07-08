@@ -27,6 +27,8 @@ class DogfightParallelEnv(ParallelEnv):
         self.wez_reward = 0.1
         self.wez_step = 0.05
         self.destroy_bonus = 2.0
+        self.hp = {a: 100 for a in self.agents} # HP iniziali
+        self.prev_hp = {a: self.hp[a] for a in self.agents} # Differenza HP per il reward
         
         # --- Agent controls ---
         self.delta_v = 0.1
@@ -120,6 +122,7 @@ class DogfightParallelEnv(ParallelEnv):
                 dq.append(pos.copy())
             self.history[agent]          = dq
             self.hp[agent]               = 100
+            self.prev_hp[agent]          = self.hp[agent]
             self.wez_steps[agent]        = 0
             self.tracking_counter[agent] = 0
             self.total_behind[agent]     = 0
@@ -254,7 +257,25 @@ class DogfightParallelEnv(ParallelEnv):
         f_head_pos = (1 - cos_pos) / 2
         f_head_vel = (1 + cos_vel) / 2
         
-        return (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
+        base_reward = (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
+
+        # penalità se l'evader è nella WEZ del chaser
+        if self._in_wez(self._other(agent)):
+            penalty_wez = -self.wez_reward
+        else:
+            penalty_wez = 0.0
+
+        # penalità se ha perso HP
+        prev = self.prev_hp[agent]
+        curr = self.hp[agent]
+        hp_diff = prev - curr
+        self.prev_hp[agent] = curr
+        penalty_hp = -self.hp_decrement if hp_diff > 0 else 0.0
+
+        # penalità se viene ucciso
+        penalty_kill = -self.destroy_bonus if self.destroyed[agent] else 0.0
+
+        return base_reward + penalty_wez + penalty_hp + penalty_kill
     
     def _compute_reward_chaser(self, agent):
         st    = self.states[agent]

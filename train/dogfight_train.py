@@ -39,7 +39,7 @@ opt_evader  = torch.optim.Adam(evader.parameters(),  lr=5e-5)
 
 gamma, lam       = 0.99, 0.95
 batch_size       = 2048
-epochs_per_phase = 10    # epochs per agent phase
+epochs_per_phase = 15    # epochs per agent phase
 cycles           = 30      # number of alternations
 pool_size        = 5  # size of the replay pool
 clip_eps        = 0.2
