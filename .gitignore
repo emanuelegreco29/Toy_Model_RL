@@ -5,3 +5,4 @@ old_stuff/
 __pycache__/
 SB3_PPO_8_obs/__pycache__/
 policies/SP/
+policies/Tag_SP/
