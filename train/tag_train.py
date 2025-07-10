@@ -18,9 +18,7 @@ os.makedirs(f"policies/Tag_SP/Tag_SelfPlay_{ts}", exist_ok=True)
 # --- Hyperparameters ---
 gamma, lam           = 0.99, 0.95
 batch_size           = 2048
-epochs_per_phase     = 15    
-cycles               = 30    
-total_epochs         = epochs_per_phase * cycles * 2  # 900
+total_epochs         = 500
 clip_eps             = 0.2
 entropy_coef         = 0.01
 lr_critic            = 3e-4
