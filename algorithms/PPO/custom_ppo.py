@@ -12,6 +12,7 @@ class CustomActorCritic(nn.Module):
                  act_dim: int, 
                  net_arch: Tuple[int, ...] = (512, 512, 512), 
                  log_std_init: float = -2.0,
+                 trainable_log_std: bool = True,
                  device: str = "cpu"):
         super().__init__()
         
@@ -43,6 +44,7 @@ class CustomActorCritic(nn.Module):
         self.action_net, self.log_std = self.action_dist.proba_distribution_net(
             latent_dim=self.mlp_extractor.latent_dim_pi,
             log_std_init=log_std_init,
+            trainable=trainable_log_std
         )
         
         # 6) Value head

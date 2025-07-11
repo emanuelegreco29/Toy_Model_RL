@@ -12,7 +12,7 @@ class DiagGaussianDistribution:
         self.action_dim = action_dim
         self.distribution = None
         
-    def proba_distribution_net(self, latent_dim: int, log_std_init: float = 0.0):
+    def proba_distribution_net(self, latent_dim: int, log_std_init: float = 0.0, trainable: bool = True):
         """
         Create the layers and parameters that represent the distribution
         
@@ -31,7 +31,7 @@ class DiagGaussianDistribution:
         nn.init.constant_(action_net.bias, 0.0)
         
         # Log std parameter (independent of input)
-        log_std = nn.Parameter(torch.ones(self.action_dim) * log_std_init)
+        log_std = nn.Parameter(torch.ones(self.action_dim) * log_std_init, requires_grad=trainable)
         
         return action_net, log_std
     
