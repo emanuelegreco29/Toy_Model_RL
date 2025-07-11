@@ -63,27 +63,55 @@ def plot_trajectory(ch_traj, ev_traj, title, save_dir):
     plt.close()
     print(f"Saved trajectory plot: {path}")
 
+def set_axes_equal(ax):
+    """Imposta scala uguale sugli assi 3D, in modo che il bounding‐box sia sempre cubico."""
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+    x_range = x_limits[1] - x_limits[0]
+    y_range = y_limits[1] - y_limits[0]
+    z_range = z_limits[1] - z_limits[0]
+    max_range = max(x_range, y_range, z_range) / 2.0
+    x_middle = np.mean(x_limits)
+    y_middle = np.mean(y_limits)
+    z_middle = np.mean(z_limits)
+    ax.set_xlim3d([x_middle - max_range, x_middle + max_range])
+    ax.set_ylim3d([y_middle - max_range, y_middle + max_range])
+    ax.set_zlim3d([z_middle - max_range, z_middle + max_range])
+
 def animate_trajectory(ch_traj, ev_traj, filename, save_dir):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
+    # fissa un’angolazione di visuale, la zoom verrà gestita automaticamente
+    ax.view_init(elev=30, azim=45)
     ch_line, = ax.plot([], [], [], lw=2, label='Chaser')
     ev_line, = ax.plot([], [], [], lw=2, linestyle='--', label='Evader')
     ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
     ax.legend()
+    margin = 0.5  # spazio extra intorno agli agenti
 
     def update(frame):
-        # aggiorna dati fino al frame corrente
+        # aggiorna traiettorie
         ch_line.set_data(ch_traj[:frame+1,0], ch_traj[:frame+1,1])
         ch_line.set_3d_properties(ch_traj[:frame+1,2])
         ev_line.set_data(ev_traj[:frame+1,0], ev_traj[:frame+1,1])
         ev_line.set_3d_properties(ev_traj[:frame+1,2])
-        # regola i limiti in modo dinamico
-        all_pts = np.vstack([ch_traj[:frame+1], ev_traj[:frame+1]])
-        mins = all_pts.min(axis=0) - 0.5
-        maxs = all_pts.max(axis=0) + 0.5
-        ax.set_xlim(mins[0], maxs[0])
-        ax.set_ylim(mins[1], maxs[1])
-        ax.set_zlim(mins[2], maxs[2])
+
+        # calcola bounding‐box sui due agenti al frame corrente
+        pts = np.vstack((ch_traj[frame], ev_traj[frame]))
+        min_pt = pts.min(axis=0)
+        max_pt = pts.max(axis=0)
+        center = (min_pt + max_pt) / 2
+        half_range = np.max(max_pt - min_pt) / 2 + margin
+
+        # aggiorna limiti di visuale
+        ax.set_xlim(center[0] - half_range, center[0] + half_range)
+        ax.set_ylim(center[1] - half_range, center[1] + half_range)
+        ax.set_zlim(center[2] - half_range, center[2] + half_range)
+
+        # forza scala uguale sui tre assi
+        set_axes_equal(ax)
+
         return ch_line, ev_line
 
     ani = FuncAnimation(fig, update, frames=len(ch_traj), interval=100, blit=False)
@@ -94,6 +122,8 @@ def animate_trajectory(ch_traj, ev_traj, filename, save_dir):
 
 
 chaser_path, evader_path = load_latest_policies()
+# chaser_path = "policies/policy.pth"
+# evader_path = "policies/policy.pth"
 env = TagEnv(K_history=1)
 obs_dim = env.observation_spaces['Agent 0'].shape[0]
 act_dim = env.action_spaces['Agent 0'].shape[0]
