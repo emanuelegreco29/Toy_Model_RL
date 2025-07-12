@@ -19,11 +19,14 @@ os.makedirs(f"policies/Tag_SP/Tag_SelfPlay_{ts}", exist_ok=True)
 gamma, lam           = 0.99, 0.95
 batch_size           = 2048
 total_epochs         = 500
+save_interval        = 50 # Save every X epochs
+
 clip_eps             = 0.2
 entropy_coef         = 0.01
-lr_critic            = 3e-4
+lr_critic            = 5e-5
 lr_actor             = 5e-5
 K_history            = 1
+smoothing_coeff      = 1e-3 # For smoothing the critic loss
 
 # --- Environment ---
 env = TagEnv(K_history=K_history)
@@ -40,7 +43,7 @@ critic_opt      = optim.Adam(critic.parameters(), lr=lr_critic)
 agents = {}
 opts   = {}
 for ag in env.agents:
-    net = CustomActorCritic(obs_dim, act_dim, log_std_init=-2)
+    net = CustomActorCritic(obs_dim, act_dim, log_std_init=-15, trainable_log_std=False)
     net.load_state_dict(torch.load("policies/policy.pth"))
     agents[ag] = net
     opts[ag]   = optim.Adam(net.parameters(), lr=lr_actor)
@@ -116,15 +119,18 @@ for ep in range(1, total_epochs+1):
         logp_old_b = torch.stack(buf[ag]['logp_old'])
         adv        = adv_ret[ag]['adv']
 
+        act_diff = act_b[1:] - act_b[:-1]
         mean, log_std, _ = agents[ag](obs_b)
         dist  = torch.distributions.Normal(mean, log_std.exp())
         logp_new = dist.log_prob(act_b).sum(-1)
         ratio    = torch.exp(logp_new - logp_old_b)
         s1       = ratio * adv
         s2       = torch.clamp(ratio, 1-clip_eps, 1+clip_eps) * adv
+        
         policy_loss  = -torch.min(s1, s2).mean()
         entropy_loss = -dist.entropy().sum(-1).mean()
-        loss = policy_loss + entropy_coef * entropy_loss
+        smooth_loss = smoothing_coeff * (act_diff**2).sum(dim=-1).mean()
+        loss = policy_loss + entropy_coef * entropy_loss + smooth_loss
 
         opts[ag].zero_grad()
         loss.backward()
@@ -136,7 +142,7 @@ for ep in range(1, total_epochs+1):
     fb1    = infos[a1]['followed']
     print(f"[Episode {ep}] Distance {dist:.3f} | Behind {a0}: {fb0}, {a1}: {fb1}")
     
-    if ep % 50 == 0:
+    if ep % save_interval == 0:
         for ag in env.agents:
             torch.save(agents[ag].state_dict(),
                     f"policies/Tag_SP/Tag_SelfPlay_{ts}/{ag}_policy_ep{ep}.pth")

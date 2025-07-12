@@ -18,13 +18,15 @@ class TagEnv(ParallelEnv):
         self.dt = 0.1
         self.max_steps = 500
         self.K_history = K_history
+        self.prev_dist = {ag: None for ag in self.agents}
+        self.alpha_act = 0.7
         
         # --- Agent controls ---
         self.delta_v = 0.1
         self.delta_yaw = 0.4
         self.delta_pitch = 0.4
         self.v_max = 1.5
-        self.v_min = 0.1
+        self.v_min = 1.0
         
         # Observation space
         obs_dim = 18
@@ -48,6 +50,9 @@ class TagEnv(ParallelEnv):
         act_low = np.array([-self.delta_v, -self.delta_yaw, -self.delta_pitch], dtype=np.float32)
         act_high= np.array([ self.delta_v,  self.delta_yaw,  self.delta_pitch], dtype=np.float32)
         self.action_spaces = {a: spaces.Box(act_low, act_high, dtype=np.float32) for a in self.agents}
+        self.prev_act = {ag: np.zeros(self.action_spaces[ag].shape, dtype=np.float32)
+                    for ag in self.agents}
+
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -108,6 +113,11 @@ class TagEnv(ParallelEnv):
             self.history[agent]          = dq
             self.tracking_counter[agent] = 0
             self.total_behind[agent]     = 0
+            
+        # Initialize previous distances
+        for agent in self.agents:
+            d0 = np.linalg.norm(self.states[agent][:3] - self.states[self._other(agent)][:3])
+            self.prev_dist[agent] = d0
         
         obs = {agent: self._get_obs(agent) for agent in self.agents}
         global_state = np.concatenate([obs[a] for a in self.agents], axis=0)
@@ -152,8 +162,16 @@ class TagEnv(ParallelEnv):
         # 1) Update positions & histories
         for ag, act in action_dict.items():
             st = self.states[ag].copy()
+            
+            # Smooth the action
+            prev = self.prev_act[ag]
+            smoothed = self.alpha_act * prev + (1 - self.alpha_act) * act
+            self.prev_act[ag] = smoothed.copy()
             x,y,z,v,yaw,pitch = st
-            dv, dyaw, dpitch = act
+            #dv, dyaw, dpitch = act
+            dv, dyaw, dpitch = smoothed # Use smoothed action
+            
+            # Update state
             v     = np.clip(v + dv, self.v_min, self.v_max)
             yaw   = ((yaw + dyaw + np.pi) % (2*np.pi)) - np.pi
             pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
@@ -162,6 +180,7 @@ class TagEnv(ParallelEnv):
             dz = v * np.sin(pitch)             * self.dt
             new = np.array([x+dx, y+dy, z+dz, v, yaw, pitch], dtype=np.float32)
             self.states[ag] = new
+            
             # update history of positions
             self.history[ag].append(new[:3].copy())
         self.current_step += 1
@@ -211,6 +230,10 @@ class TagEnv(ParallelEnv):
         ux, uy, uz = vec / d3
         position_vec = np.array([ux, uy, uz])
         
+        # distanza attuale e precedente
+        d_prev = self.prev_dist[agent]
+        d_curr = float(np.linalg.norm(self.states[agent][:3] - other[:3]))
+        
         # agent forward vector
         yaw, pitch = st[4], st[5]
         dx = math.cos(pitch) * math.cos(yaw)
@@ -234,8 +257,19 @@ class TagEnv(ParallelEnv):
         penalty_align = cos_align # -1 < 1
 
         w_align = 0.2
+        
+        # Shaping the reward based on previous distance
+        if self.total_behind[agent] > self.total_behind[self._other(agent)]:
+            # agent è stato dietro quindi è svantaggiato
+            delta = d_curr - d_prev
+        else:
+            # agent è stato davanti quindi è avvantaggiato
+            delta = d_prev - d_curr
+            
+        k = 0.1
+        self.prev_dist[agent] = d_curr
 
-        return base_reward - w_align * penalty_align
+        return base_reward - w_align * penalty_align + k * delta
 
     def _is_behind(self, agent):
         agent_pos = self.states[agent][:3]

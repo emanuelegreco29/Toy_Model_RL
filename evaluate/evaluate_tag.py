@@ -64,7 +64,7 @@ def plot_trajectory(ch_traj, ev_traj, title, save_dir):
     print(f"Saved trajectory plot: {path}")
 
 def set_axes_equal(ax):
-    """Imposta scala uguale sugli assi 3D, in modo che il bounding‐box sia sempre cubico."""
+    """Imposta scala uguale sugli assi 3D, in modo che il bounding-box sia sempre cubico."""
     x_limits = ax.get_xlim3d()
     y_limits = ax.get_ylim3d()
     z_limits = ax.get_zlim3d()
