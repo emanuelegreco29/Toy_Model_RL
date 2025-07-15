@@ -39,11 +39,12 @@ opt_evader  = torch.optim.Adam(evader.parameters(),  lr=5e-5)
 
 gamma, lam       = 0.99, 0.95
 batch_size       = 2048
-epochs_per_phase = 15    # epochs per agent phase
-cycles           = 30      # number of alternations
-pool_size        = 5  # size of the replay pool
-clip_eps        = 0.2
-entropy_coef    = 0.01
+epochs_per_phase = 25    # epochs per agent phase
+cycles           = 10    # number of alternations
+save_interval    = 25    # save model every X epochs
+pool_size        = 10     # size of the replay pool
+clip_eps         = 0.2
+entropy_coef     = 0.01
 
 chaser_pool = deque(maxlen=pool_size)
 evader_pool = deque(maxlen=pool_size)
@@ -54,7 +55,7 @@ def run_phase(train_agent, opponent_pool, self_pool, optimizer, start_ep):
     ep = start_ep
     train_id = f"{train_agent}_0"
 
-    for _ in range(epochs_per_phase):
+    for cycle_ep in range(1, epochs_per_phase + 1):
         # sample a frozen opponent snapshot
         opponent_snapshot = random.choice(list(opponent_pool))
         opponent_snapshot.eval()
@@ -119,22 +120,21 @@ def run_phase(train_agent, opponent_pool, self_pool, optimizer, start_ep):
 
             steps += 1
 
-        values_c = torch.stack([critic(gs) for gs in batch_global_states])  # shape [T+1], requires_grad=True
+        # Compute GAE & returns
+        values_c   = torch.stack([critic(gs) for gs in batch_global_states])
+        values_det = values_c.detach()
 
-        values_det = values_c.detach()  # shape [T+1]
-
-        # Calcolo GAE & returns
-        rew_b   = torch.stack(buf_rews)                             # [T]
-        done_b  = torch.tensor(buf_dones, dtype=torch.float32)      # [T]
+        rew_b   = torch.stack(buf_rews)
+        done_b  = torch.tensor(buf_dones, dtype=torch.float32)
         adv     = torch.zeros_like(rew_b)
         lastgaelam = 0
         for t in reversed(range(len(rew_b))):
             nonterm = 1.0 - done_b[t]
             delta = rew_b[t] + gamma * values_det[t+1] * nonterm - values_det[t]
             adv[t] = lastgaelam = delta + gamma * lam * nonterm * lastgaelam
-        returns = adv + values_det[:-1]   # [T]
+        returns = adv + values_det[:-1]
 
-        # Update del critic
+        # Update critic
         critic_loss = ((values_c[:-1] - returns)**2).mean()
         critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -162,7 +162,7 @@ def run_phase(train_agent, opponent_pool, self_pool, optimizer, start_ep):
         optimizer.zero_grad()
         loss.backward()
 
-        # logging
+        # logging gradients & entropy
         total_norm_sq = 0.0
         for p in net.parameters():
             if p.grad is not None:
@@ -173,36 +173,41 @@ def run_phase(train_agent, opponent_pool, self_pool, optimizer, start_ep):
 
         optimizer.step()
 
+        # snapshot for self-play
         if train_agent == 'evader':
             self_pool.append(copy.deepcopy(evader))
         else:
             self_pool.append(copy.deepcopy(chaser))
 
-        # epoch logging & checkpoint
-        avg_r = np.mean(episode_rewards) if episode_rewards else curr_reward
-        avg_hp = np.mean(episode_hps) if episode_hps else infos[train_id].get('final_hp',0)
-        avg_l = np.mean(episode_lengths) if episode_lengths else curr_length
-        print(f"[{train_agent} ep {ep}] loss {loss.item():.3f}, "
-              f"AvgR {avg_r:.2f} | AvgHP {avg_hp:.1f} | AvgL {avg_l:.1f}")
+        # epoch-level metrics
+        avg_r  = np.mean(episode_rewards) if episode_rewards else 0.0
+        avg_hp = np.mean(episode_hps)     if episode_hps     else 0.0
+        final_dist = infos[train_id].get('distance', 0.0)
 
-        if ep % 10 == 0:
+        # stampa richiesta
+        print(f"[Training {train_agent}] TotalEp {ep + 1} | CycleEp {cycle_ep} | "
+              f"Reward {avg_r:.2f} | EvaderHP {avg_hp:.1f} | Distance {final_dist:.3f}")
+
+        # checkpoint ogni X episodi
+        if (ep + 1) % save_interval == 0:
             state = evader.state_dict() if train_agent=='evader' else chaser.state_dict()
-            torch.save(state, f"policies/SP/SelfPlay_{ts}/selfplay_{train_agent}_ep{ep}.pth")
+            torch.save(state, f"policies/ShootDown/ShootDown_{ts}/shoot_{train_agent}_ep{ep+1}.pth")
 
         ep += 1
+
     return ep
 
 # Run alternating training phases
 ep_cursor = 0
 
 # Create directories for saving policies
-os.makedirs("policies/SP", exist_ok=True)
+os.makedirs("policies/ShootDown", exist_ok=True)
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
-os.makedirs(f"policies/SP/SelfPlay_{ts}", exist_ok=True)
+os.makedirs(f"policies/ShootDown/ShootDown_{ts}", exist_ok=True)
 
-# Further alternations
+# Alternating training
 for cycle in range(cycles):
-    # Evader trains against a random chaser snapshot
+    # Evader phase
     for p in evader.parameters(): p.requires_grad = True
     for p in chaser.parameters(): p.requires_grad = False
     ep_cursor = run_phase(
@@ -213,7 +218,7 @@ for cycle in range(cycles):
         start_ep=ep_cursor
     )
 
-    # Chaser trains against a random evader snapshot
+    # Chaser phase
     for p in evader.parameters(): p.requires_grad = False
     for p in chaser.parameters(): p.requires_grad = True
     ep_cursor = run_phase(
