@@ -7,3 +7,4 @@ SB3_PPO_8_obs/__pycache__/
 policies/SP/
 policies/Tag_SP/
 policies/ShootDown/
+policies/Fight_SP/
