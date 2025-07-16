@@ -14,10 +14,6 @@ from environments.fight_env import FightEnv
 from algorithms.PPO.custom_ppo import CustomActorCritic
 
 def load_latest_policies(base_dir='policies/Fight_SP'):
-    """
-    Cerca la cartella Fight_SelfPlay più recente in base_dir,
-    e restituisce i due file di policy più recenti per Agent 0 e Agent 1.
-    """
     folders = glob.glob(os.path.join(base_dir, 'Fight_SelfPlay_*'))
     if not folders:
         raise FileNotFoundError(f"No Fight_SelfPlay folders found in {base_dir}")
@@ -29,21 +25,18 @@ def load_latest_policies(base_dir='policies/Fight_SP'):
     return chaser_file, evader_file
 
 def evaluate_policies(chaser_net, evader_net, env, num_episodes=100):
-    """
-    Esegue num_episodes di roll-out self-play e raccoglie
-    le traiettorie e il conteggio 'followed' per ciascuna epoca.
-    """
     trajs = []
-    followed = []
+    final_hp = []
+    total_rews = []
     for ep in range(num_episodes):
         obs, infos = env.reset()
         done = False
         ch_traj, ev_traj = [], []
+        sum0 = 0.0
+        sum1 = 0.0
         while not done:
-            # salva posizione corrente
             ch_traj.append(env.states['Agent 0'][:3].copy())
             ev_traj.append(env.states['Agent 1'][:3].copy())
-            # scelta action: prendo la media (no sampling)
             actions = {}
             for name, net in [('Agent 0', chaser_net), ('Agent 1', evader_net)]:
                 o = torch.tensor(obs[name], dtype=torch.float32).unsqueeze(0)
@@ -51,12 +44,15 @@ def evaluate_policies(chaser_net, evader_net, env, num_episodes=100):
                     mean, log_std, _ = net(o)
                 actions[name] = mean.squeeze().numpy()
             obs, rews, dones, infos = env.step(actions)
+            sum0 += rews['Agent 0']
+            sum1 += rews['Agent 1']
             done = any(dones.values())
         trajs.append((np.array(ch_traj), np.array(ev_traj)))
-        f0 = infos['Agent 0']['followed']
-        f1 = infos['Agent 1']['followed']
-        followed.append((f0, f1))
-    return trajs, followed
+        h0 = infos['Agent 0']['final_hp']
+        h1 = infos['Agent 1']['final_hp']
+        final_hp.append((h0, h1))
+        total_rews.append((sum0, sum1))
+    return trajs, final_hp, total_rews
 
 def plot_trajectory(ch_traj, ev_traj, title, save_dir):
     fig = plt.figure()
@@ -74,7 +70,6 @@ def plot_trajectory(ch_traj, ev_traj, title, save_dir):
     print(f"Saved trajectory plot: {path}")
 
 def set_axes_equal(ax):
-    """Imposta scala uguale sugli assi 3D."""
     x_limits = ax.get_xlim3d()
     y_limits = ax.get_ylim3d()
     z_limits = ax.get_zlim3d()
@@ -124,30 +119,50 @@ chaser_path, evader_path = load_latest_policies()
 
 env = FightEnv(K_history=1)
 obs_dim = env.observation_spaces['Agent 0'].shape[0]
-act_dim = env.action_spaces['Agent 0'].shape[0]
+act_dim = env.action_spaces   ['Agent 0'].shape[0]
 
 chaser_net = CustomActorCritic(obs_dim, act_dim)
 chaser_net.load_state_dict(torch.load(chaser_path, map_location='cpu'))
-for p in chaser_net.parameters(): p.requires_grad = False
+chaser_net.eval()
 
 evader_net = CustomActorCritic(obs_dim, act_dim)
 evader_net.load_state_dict(torch.load(evader_path, map_location='cpu'))
-for p in evader_net.parameters(): p.requires_grad = False
+evader_net.eval()
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 save_dir = os.path.join('plots', f'eval_fight_{ts}')
 os.makedirs(save_dir, exist_ok=True)
 
 print("Evaluating Fight agents for 100 episodes...")
-trajectories, followed = evaluate_policies(chaser_net, evader_net, env, num_episodes=100)
+trajectories, hp, rews = evaluate_policies(chaser_net, evader_net, env, num_episodes=100)
 
-follows_ch = [f[0] for f in followed]
-best_idx  = int(np.argmax(follows_ch))
-worst_idx = int(np.argmin(follows_ch))
-print(f"Best episode #{best_idx+1} with followed={follows_ch[best_idx]}")
-print(f"Worst episode #{worst_idx+1} with followed={follows_ch[worst_idx]}")
+# selezione best: ep con killer (hp==0) e max reward del vincitore
+killer_eps = []
+for i, (h0, h1) in enumerate(hp):
+    if h0 == 0 or h1 == 0:
+        # indice, reward vincitore
+        winner = 1 if h0 == 0 else 0
+        killer_eps.append((i, rews[i][winner]))
+if killer_eps:
+    best_idx = max(killer_eps, key=lambda x: x[1])[0]
+else:
+    # fallback: miglior reward complessivo
+    best_idx = max(range(len(rews)), key=lambda i: sum(rews[i]))
 
-# Save plot and GIF
+# selezione worst: ep con entrambi hp==100 e min reward complessivo
+both_safe = [i for i,(h0,h1) in enumerate(hp) if h0==100 and h1==100]
+if both_safe:
+    worst_idx = min(both_safe, key=lambda i: sum(rews[i]))
+else:
+    # fallback: peggior reward complessivo
+    worst_idx = min(range(len(rews)), key=lambda i: sum(rews[i]))
+
+r0_b, r1_b   = rews[best_idx]
+r0_w, r1_w   = rews[worst_idx]
+print(f"Best episode #{best_idx+1} with final HP = {hp[best_idx]} and rewards = {r0_b:.2f} and {r1_b:.2f}")
+print(f"Worst episode #{worst_idx+1} with final HP = {hp[worst_idx]} and rewards = {r0_w:.2f} and {r1_w:.2f}")
+
+# salva plot e GIF
 plot_trajectory(*trajectories[best_idx],  f"best_episode_{best_idx+1}",  save_dir)
 plot_trajectory(*trajectories[worst_idx], f"worst_episode_{worst_idx+1}", save_dir)
 
