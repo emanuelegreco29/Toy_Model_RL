@@ -19,7 +19,7 @@ class DogfightParallelEnv(ParallelEnv):
         self.max_steps = 500
         self.K_history = K_history
         self.prev_dist = {ag: None for ag in self.agents}
-        self.alpha_act = 0.7
+        self.alpha_act = 0.2
         
         # --- WEZ & combat ---
         self.wez_length = 2.0
@@ -38,6 +38,8 @@ class DogfightParallelEnv(ParallelEnv):
         self.delta_pitch = 0.4
         self.v_max = 1.5
         self.v_min = 1.0
+        self.evader_v_max = 1.0
+        self.evader_v_min = 0.75
         
         # Observation space
         obs_dim = 18
@@ -107,14 +109,16 @@ class DogfightParallelEnv(ParallelEnv):
             ch_pos = np.array([ 0.25, 0.0, 0.0], dtype=np.float32)
             yaw_cp, pitch_cp = 0.0, 0.0
 
-        speed = 1.0
+        #speed = 1.0
 
         # Assign initial state to each agent
         for agent in self.agents:
             if agent == 'chaser_0':
                 pos, yaw, pitch = ch_pos, yaw_cp, pitch_cp
+                speed = np.random.uniform(self.v_min, self.v_max)
             else:  # evader_0
                 pos, yaw, pitch = ep_pos, yaw_ep, pitch_ep
+                speed = np.random.uniform(self.evader_v_min, self.evader_v_max)
 
             state = np.array([*pos, speed, yaw, pitch], dtype=np.float32)
             self.states[agent] = state
@@ -189,7 +193,11 @@ class DogfightParallelEnv(ParallelEnv):
             dv, dyaw, dpitch = smoothed # Use smoothed action
             
             # Update state
-            v     = np.clip(v + dv, self.v_min, self.v_max)
+            if ag == 'chaser_0':
+                vmin, vmax = self.v_min, self.v_max
+            else:  # evader_0
+                vmin, vmax = self.evader_v_min, self.evader_v_max
+            v     = np.clip(v + dv, vmin, vmax)
             yaw   = ((yaw + dyaw + np.pi) % (2*np.pi)) - np.pi
             pitch = np.clip(pitch + dpitch, -np.pi/2, np.pi/2)
             dx = v * np.cos(pitch) * np.cos(yaw) * self.dt
@@ -259,10 +267,6 @@ class DogfightParallelEnv(ParallelEnv):
         ux, uy, uz = vec / d3
         position_vec = np.array([ux, uy, uz])
         
-        # distanza attuale e precedente
-        d_prev = self.prev_dist[agent]
-        d_curr = float(np.linalg.norm(self.states[agent][:3] - other[:3]))
-        
         # agent forward vector
         yaw, pitch = st[4], st[5]
         dx = math.cos(pitch) * math.cos(yaw)
@@ -275,42 +279,10 @@ class DogfightParallelEnv(ParallelEnv):
         cos_vel = np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0)
         cos_pos = np.clip(np.dot(position_vec, target_dir), -1.0, 1.0)
         
-        f_head_pos = (1 - cos_pos) / 2
-        f_head_vel = (1 + cos_vel) / 2
+        f_head_pos = (1 + cos_pos) / 2
+        f_head_vel = (1 - cos_vel) / 2
         
         base_reward = (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
-    
-        # 2) penalità di allineamento
-        other_dir = self._get_target_direction(self._other(agent))
-        cos_align = np.clip(np.dot(direction_vec, other_dir), -1.0, 1.0)
-        penalty_align = cos_align # -1 < 1
-
-        w_align = 0.2
-        
-        # 3) Closure‐rate: velocità relativa lungo la linea di tiro
-        prev_e = self.history[agent][-2]
-        curr_e = self.history[agent][-1]
-        prev_c = self.history[self._other(agent)][-2]
-        curr_c = self.history[self._other(agent)][-1]
-
-        vel_e = (curr_e - prev_e) / self.dt
-        vel_c = (curr_c - prev_c) / self.dt
-
-        los_vec  = curr_e - curr_c
-        los_dist = np.linalg.norm(los_vec) + 1e-8
-        los_unit = los_vec / los_dist
-
-        # >0 se il chaser ti sta chiudendo
-        closure_rate = np.dot(vel_c - vel_e, los_unit)
-        alpha = 0.5  # coefficiente di quanto penalizzare il closure
-        
-        # Shaping the reward based on previous distance
-        delta = d_curr - d_prev
-            
-        k = 0.5
-        self.prev_dist[agent] = d_curr
-
-        distance_align_rew = base_reward - w_align * penalty_align + k * delta - alpha * closure_rate
         
         # penalità se l'evader è nella WEZ del chaser
         if self._in_wez(self._other(agent)):
@@ -328,7 +300,7 @@ class DogfightParallelEnv(ParallelEnv):
         # penalità se viene ucciso
         penalty_kill = -self.destroy_bonus if self.destroyed[agent] else 0.0
 
-        return distance_align_rew + penalty_wez + penalty_hp + penalty_kill
+        return base_reward + penalty_wez + penalty_hp + penalty_kill
     
     def _compute_reward_chaser(self, agent):
         st = self.states[agent]
