@@ -10,7 +10,7 @@ import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 from mpl_toolkits.mplot3d import Axes3D
 
-from environments.dogfight_env import DogfightParallelEnv
+from environments.shootdown_env import DogfightParallelEnv
 from algorithms.PPO.custom_ppo import CustomActorCritic
 
 def load_latest_policies(base_dir='policies/ShootDown'):

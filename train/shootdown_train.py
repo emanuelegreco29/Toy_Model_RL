@@ -10,7 +10,7 @@ import copy
 import torch.optim as optim
 
 from collections import deque
-from environments.dogfight_env import DogfightParallelEnv
+from environments.shootdown_env import DogfightParallelEnv
 from algorithms.PPO.custom_ppo import CustomActorCritic
 from algorithms.utilities.centralized_critic import CentralizedCritic
 
