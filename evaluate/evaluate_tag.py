@@ -137,7 +137,7 @@ evader_net.load_state_dict(torch.load(evader_path, map_location='cpu'))
 for p in evader_net.parameters(): p.requires_grad = False
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
-save_dir = os.path.join('plots', f'eval_tag_{ts}')
+save_dir = os.path.join('plots/Tag', f'eval_tag_{ts}')
 os.makedirs(save_dir, exist_ok=True)
 
 print(f"Evaluating Tag agents for 100 episodes...")

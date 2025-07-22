@@ -169,7 +169,7 @@ for p in evader_net.parameters():
     p.requires_grad = False
 
 timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
-save_dir = os.path.join('plots', f'eval_shootdown_{timestamp}')
+save_dir = os.path.join('plots/ShootDown', f'eval_shootdown_{timestamp}')
 os.makedirs(save_dir, exist_ok=True)
 
 num_episodes = 100

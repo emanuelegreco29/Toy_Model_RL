@@ -130,7 +130,7 @@ evader_net.load_state_dict(torch.load(evader_path, map_location='cpu'))
 evader_net.eval()
 
 ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
-save_dir = os.path.join('plots', f'eval_fight_{ts}')
+save_dir = os.path.join('plots/Fight', f'eval_fight_{ts}')
 os.makedirs(save_dir, exist_ok=True)
 
 print("Evaluating Fight agents for 100 episodes...")
