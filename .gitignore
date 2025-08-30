@@ -9,3 +9,5 @@ policies/Tag_SP/
 policies/ShootDown/
 policies/Fight_SP/
 policies/Tag_Shoot_SP/
+policies/Tag_Shoot_IPPO/
+policies/Tag_Shoot_IPPO_Fixed/
