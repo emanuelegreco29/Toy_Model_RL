@@ -16,20 +16,19 @@ from algorithms.IPPO.utils import set_seed, safecpu, explained_variance
 
 # Improved hyperparameters
 total_timesteps = 2000000
-steps_per_update = 4096
+steps_per_update = 5000
 update_epochs = 4
 num_minibatches = 16         # More minibatches for better gradient estimates
 learning_rate = 1e-4
 gamma = 0.995                # Higher discount for longer-term planning
 gae_lambda = 0.95
 clip_coef = 0.2
-ent_coef = 0.01              # Lower entropy for more focused policies
+ent_coef = 0.03              # Lower entropy for more focused policies
 vf_coef = 0.5
 max_grad_norm = 0.5
 seed = 42
 device = "cuda" if torch.cuda.is_available() else "cpu"
 save_interval = 25
-k_history = 5                # More history for better tactical awareness
 log_interval = 1
 tag = "Tag_Shoot_IPPO"
 
@@ -53,9 +52,8 @@ with open(os.path.join(save_dir, "hyperparams.txt"), "w") as f:
     f.write(f"clip_coef: {clip_coef}\n")
     f.write(f"ent_coef: {ent_coef}\n")
     f.write(f"vf_coef: {vf_coef}\n")
-    f.write(f"k_history: {k_history}\n")
 
-env = TagShootEnv(K_history=k_history)
+env = TagShootEnv()
 agent_names = env.agents
 obs_dim = env.observation_spaces[agent_names[0]].shape[0]
 act_dim = env.action_spaces[agent_names[0]].shape[0]
