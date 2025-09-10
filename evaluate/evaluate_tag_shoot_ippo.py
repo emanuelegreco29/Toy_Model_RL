@@ -76,6 +76,132 @@ def policy_from_ckpt(path, obs_dim, act_dim, device="cpu"):
     net.eval()
     return net.to(device)
 
+def _nose_from_yaw_pitch(yaw: float, pitch: float) -> np.ndarray:
+    cp = math.cos(pitch)
+    return np.array([cp * math.cos(yaw), cp * math.sin(yaw), math.sin(pitch)], dtype=np.float64)
+
+def _step_engagement_features(env, prev_d: float | None, prox_factor: float = 2.0):
+    s0 = env.states['Agent 0']; s1 = env.states['Agent 1']
+    p0, p1 = s0[:3], s1[:3]
+    y0, ph0 = float(s0[4]), float(s0[5])
+    y1, ph1 = float(s1[4]), float(s1[5])
+
+    v0 = _nose_from_yaw_pitch(y0, ph0)
+    v1 = _nose_from_yaw_pitch(y1, ph1)
+
+    r01 = p1 - p0
+    d = float(np.linalg.norm(r01))
+    if d < 1e-8:
+        los01 = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        los01 = r01 / d
+    los10 = -los01
+
+    # Puntamento ∈ [0,1] per ciascun agente, poi media
+    f0 = 0.5 * (1.0 + float(np.clip(np.dot(v0, los01), -1.0, 1.0)))
+    f1 = 0.5 * (1.0 + float(np.clip(np.dot(v1, los10), -1.0, 1.0)))
+    f_point_avg = 0.5 * (f0 + f1)
+
+    # Prossimità (entro 2× WEZ per default)
+    in_prox = 1.0 if d <= prox_factor * float(env.wez_length) else 0.0
+
+    # Presenza in WEZ (almeno uno dei due)
+    try:
+        in_wez_any = 1.0 if (env._in_wez('Agent 0') or env._in_wez('Agent 1')) else 0.0
+    except Exception:
+        # fallback conservativo se la funzione non è esposta
+        in_wez_any = 1.0 if (in_prox and (f0 > 0.5 or f1 > 0.5)) else 0.0
+
+    # Chiusura (diminuzione distanza fra step)
+    is_closing = 0.0
+    if prev_d is not None and d < prev_d - 1e-6:
+        is_closing = 1.0
+
+    return f_point_avg, in_prox, in_wez_any, is_closing, d
+
+# ==== Evaluation helpers (WEZ, closure, orbita, PMD, lock-gating) ====
+def _speed_vec_from_state(s: np.ndarray) -> np.ndarray:
+    v, yaw, pitch = float(s[3]), float(s[4]), float(s[5])
+    cp = math.cos(pitch)
+    return np.array([v * cp * math.cos(yaw), v * cp * math.sin(yaw), v * math.sin(pitch)], dtype=np.float64)
+
+def _los_and_d(p_i: np.ndarray, p_j: np.ndarray):
+    r = p_j - p_i
+    d = float(np.linalg.norm(r))
+    if d < 1e-8:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64), 0.0
+    return (r / d), d
+
+def _closure_from_states(s_i: np.ndarray, s_j: np.ndarray) -> float:
+    p_i, p_j = s_i[:3].astype(np.float64), s_j[:3].astype(np.float64)
+    los, _ = _los_and_d(p_i, p_j)
+    v_rel = _speed_vec_from_state(s_i) - _speed_vec_from_state(s_j)
+    return -float(np.dot(v_rel, los))  # >0 se chiudi
+
+def _relative_components_eval(s_i: np.ndarray, s_j: np.ndarray):
+    """vr (>0 chiusura), vt (tangenziale), cos_orbit (co-planarità)"""
+    p_i, p_j = s_i[:3].astype(np.float64), s_j[:3].astype(np.float64)
+    v_i, v_j = _speed_vec_from_state(s_i), _speed_vec_from_state(s_j)
+    los, d = _los_and_d(p_i, p_j)
+    v_rel = v_i - v_j
+    vr = -float(np.dot(v_rel, los))
+    vt = float(np.linalg.norm(np.cross(v_rel, los)))
+    h_i = np.cross(p_j - p_i, v_i); h_j = np.cross(p_j - p_i, v_j)
+    nh_i, nh_j = np.linalg.norm(h_i), np.linalg.norm(h_j)
+    cos_orbit = 0.0 if nh_i < 1e-9 or nh_j < 1e-9 else float(np.clip(np.dot(h_i, h_j) / (nh_i * nh_j), -1.0, 1.0))
+    return vr, vt, cos_orbit, d
+
+def _los_rate_and_pmd_eval(s_i: np.ndarray, s_j: np.ndarray):
+    p_i, p_j = s_i[:3].astype(np.float64), s_j[:3].astype(np.float64)
+    v_i, v_j = _speed_vec_from_state(s_i), _speed_vec_from_state(s_j)
+    r = p_j - p_i
+    d2 = float(np.dot(r, r)) + 1e-12
+    v_rel = v_j - v_i
+    los_rate = float(np.linalg.norm(np.cross(v_rel, r)) / d2)
+    vrel_n = float(np.linalg.norm(v_rel)) + 1e-12
+    pmd = float(np.linalg.norm(np.cross(r, v_rel)) / vrel_n)
+    return los_rate, pmd
+
+def _in_wez_eval(env: TagShootEnv, shooter: np.ndarray, target: np.ndarray) -> bool:
+    rel = target[:3] - shooter[:3]
+    d = float(np.linalg.norm(rel))
+    if d < 1e-8:
+        return False
+    los = rel / d
+    cp = math.cos(float(shooter[5]))
+    nose = np.array([cp * math.cos(float(shooter[4])), cp * math.sin(float(shooter[4])), math.sin(float(shooter[5]))])
+    cos_nose = float(np.dot(nose, los))
+    return (d <= float(env.wez_length)) and (cos_nose >= float(env.wez_cos_threshold))
+
+def _good_lock_geom_eval(env: TagShootEnv, shooter: np.ndarray, target: np.ndarray) -> bool:
+    """Replica il lock-gating: WEZ + closure>0 + nose·LOS/LEAD buoni + PMD bassa + cooldown=0."""
+    # cooldown check (env espone i dict)
+    shooter_name = 'Agent 0' if np.all(shooter is env.states['Agent 0']) else 'Agent 1'
+    if env.cooldown.get(shooter_name, 0) > 0:
+        return False
+
+    p_i, p_j = shooter[:3], target[:3]
+    los, d = _los_and_d(p_i, p_j)
+    # nose shooter
+    cp = math.cos(float(shooter[5]))
+    nose = np.array([cp * math.cos(float(shooter[4])), cp * math.sin(float(shooter[4])), math.sin(float(shooter[5]))])
+    # lead (grezzo come in env)
+    vhat_j = _speed_vec_from_state(target); vj = float(np.linalg.norm(vhat_j)) + 1e-6
+    t_lead = d / max(1e-6, float(env.v_max))
+    lead_dir = p_j + (vhat_j / vj) * float(env.v_max) * t_lead - p_i
+    n = np.linalg.norm(lead_dir); lead_u = (lead_dir / n) if n > 1e-8 else los
+
+    closure = _closure_from_states(shooter, target)
+    _, pmd = _los_rate_and_pmd_eval(shooter, target)
+    in_wez = _in_wez_eval(env, shooter, target)
+
+    cos_th_wez = float(env.wez_cos_threshold)
+    cos_th_lead = float(math.cos(math.radians(22.0)))  # tieni allineato all'env
+    return (in_wez and closure > 0.0
+            and float(np.dot(nose, los)) >= cos_th_wez
+            and float(np.dot(nose, lead_u)) >= cos_th_lead
+            and pmd <= 0.35 * float(env.wez_length))
+
 # Plotting helper functions
 def set_axes_cube(ax, center, radius):
     """Set 3D axes limits to create a cube around the center point."""
@@ -267,6 +393,24 @@ print(f"Running {num_eps} evaluation episodes...")
 
 for ep in range(num_eps):
     obs, infos = env.reset()
+    point_sum = 0.0
+    # --- extra accumulators (good-lock, orbita, divergenza, PMD) ---
+    good_lock_steps = 0
+    lock_steps = 0
+    orbit_score_sum = 0.0
+    diverge_steps = 0
+    pmd_in_wez = []
+
+    # utility per normalizzazioni
+    vmax = float(env.v_max)
+    wezL = float(env.wez_length)
+    losrate_ref = float(vmax / max(1e-6, wezL))
+
+    prox_count = 0.0
+    wez_count = 0.0
+    closing_count = 0.0
+    steps_metric = 0
+    prev_d_for_metric = None
     done = False
     a0_traj, a1_traj = [], []
     hp0_hist, hp1_hist = [], []
@@ -293,6 +437,45 @@ for ep in range(num_eps):
         obs, rews, dones, infos = env.step(actions)
         hp0_hist.append(int(env.hp['Agent 0']))
         hp1_hist.append(int(env.hp['Agent 1']))
+        fpt, in_prox, in_wez_any, is_closing, d_now = _step_engagement_features(env, prev_d_for_metric)
+        # stati aggiornati
+        s0 = env.states['Agent 0']; s1 = env.states['Agent 1']
+
+        # good-lock per ciascun lato (coerente col gating dell'env)
+        is_lock0 = _in_wez_eval(env, s0, s1) and env.cooldown['Agent 0'] == 0
+        is_lock1 = _in_wez_eval(env, s1, s0) and env.cooldown['Agent 1'] == 0
+        lock_steps += int(_in_wez_eval(env, s0, s1)) + int(_in_wez_eval(env, s1, s0))
+
+        good0 = _good_lock_geom_eval(env, s0, s1)
+        good1 = _good_lock_geom_eval(env, s1, s0)
+        good_lock_steps += int(_good_lock_geom_eval(env, s0, s1)) + int(_good_lock_geom_eval(env, s1, s0))
+
+        # orbita: vt alto + co-planarità alta (solo quando c'è ingaggio vicino)
+        vr, vt, cos_orb, _ = _relative_components_eval(s0, s1)
+        vt_n = float(np.clip(vt / max(1e-6, vmax), 0.0, 1.0))
+        orbit_score = 0.5 * vt_n + 0.5 * (0.5 * (1.0 + float(cos_orb)))  # 0..1
+        if in_wez_any > 0.0:
+            orbit_score_sum += orbit_score
+
+        # divergenza “allineato ma scappo”: penalizza comportamenti brutti
+        # (valuta lato A0 -> A1; simmetria equivalente)
+        cp = _nose_from_yaw_pitch(float(s0[4]), float(s0[5]))
+        los01, _ = _los_and_d(s0[:3], s1[:3])
+        cos_point = float(np.clip(np.dot(cp, los01), -1.0, 1.0))
+        if (cos_point > 0.85) and (_closure_from_states(s0, s1) < -0.02) and (d_now > 0.6 * wezL):
+            diverge_steps += 1
+
+        # PMD medio quando almeno un lato è in WEZ
+        if _in_wez_eval(env, s0, s1) or _in_wez_eval(env, s1, s0):
+            _, pmd01 = _los_rate_and_pmd_eval(s0, s1)
+            pmd_in_wez.append(pmd01)
+
+        point_sum += fpt
+        prox_count += in_prox
+        wez_count  += in_wez_any
+        closing_count += is_closing
+        steps_metric += 1
+        prev_d_for_metric = d_now
 
         done = any(dones.values())
         step_count += 1
@@ -302,25 +485,63 @@ for ep in range(num_eps):
     hp0_hist = np.array(hp0_hist, dtype=np.int32)
     hp1_hist = np.array(hp1_hist, dtype=np.int32)
 
-    # Detect hits: indices where HP drops
+    # ---- HITS (come prima) ----
     hits_on_0 = np.where(hp0_hist[1:] < hp0_hist[:-1])[0].tolist()
     hits_on_1 = np.where(hp1_hist[1:] < hp1_hist[:-1])[0].tolist()
-    
-    # Enhanced metrics
-    total_locks = sum(infos[ag].get('Total Lock', 0) for ag in env.agents)
     total_hits = len(hits_on_0) + len(hits_on_1)
-    final_hp_diff = int(env.hp['Agent 0']) - int(env.hp['Agent 1'])
-    engagement_metric = total_locks + total_hits * 10 + abs(final_hp_diff) * 0.1
+
+    # ---- LOCKS “BUONI” (calcolati sopra) ----
+    total_good_locks = int(good_lock_steps)
+    lock_steps_total = int(lock_steps)
+    good_lock_density = float(total_good_locks) / max(1, steps_metric)
+    good_lock_density = float(np.clip(good_lock_density, 0.0, 1.0))
+    conv_denominator = max(1, total_good_locks // max(1, int(env.lock_required)))
+    lock_to_hit_conv = float(total_hits) / float(conv_denominator)
+
+    # ---- ORBITA / DIVERGENZA / PMD ----
+    orbit_score_avg = orbit_score_sum / max(1, int(wez_count))  # orbit solo quando in WEZ
+    diverge_share   = float(diverge_steps) / max(1, steps_metric)
+    pmd_mean_in_wez = float(np.mean(pmd_in_wez)) if len(pmd_in_wez) > 0 else float('nan')
+
+    # ---- Metrica engagement rivista ----
+    point_avg   = point_sum / max(1, steps_metric)
+    prox_share  = prox_count / max(1, steps_metric)
+    wez_share   = wez_count  / max(1, steps_metric)
+    close_share = closing_count / max(1, steps_metric - 1)
+
+    engagement_metric = (
+        12.0 * total_hits           # impatto reale
+    + 3.0  * lock_to_hit_conv     # conversione lock→hit
+    + 2.0  * orbit_score_avg      # orbita stretta / co-planare
+    + 2.0  * wez_share            # tempo in WEZ
+    + 1.5  * prox_share           # vicinanza
+    + 1.5  * close_share          # chiudono
+    + 0.8  * good_lock_density    # lock di qualità, non “farm”
+    - 2.0  * diverge_share        # penalizza "allineato ma scappo"
+    )
 
     episode_stats = {
-        'total_locks': total_locks,
+        # principali
         'total_hits': total_hits,
-        'hits_on_0': len(hits_on_0),
-        'hits_on_1': len(hits_on_1),
         'final_hp': (int(env.hp['Agent 0']), int(env.hp['Agent 1'])),
         'episode_length': len(a0_traj),
-        'engagement_metric': engagement_metric
+        'engagement_metric': engagement_metric,
+        # breakdown vecchio+nuovo
+        'point_avg': point_avg,
+        'prox_share': prox_share,
+        'wez_share': wez_share,
+        'close_share': close_share,
+        # qualità lock e conversione
+        'good_locks': total_good_locks,
+        'lock_steps_total': lock_steps_total,
+        'good_lock_density': good_lock_density,
+        'lock_to_hit_conv': lock_to_hit_conv,
+        # orbita/divergenza/PMD
+        'orbit_score_avg': orbit_score_avg,
+        'diverge_share': diverge_share,
+        'pmd_mean_in_wez': pmd_mean_in_wez,
     }
+
 
     episodes.append((a0_traj, a1_traj, hits_on_0, hits_on_1, engagement_metric, episode_stats))
 
@@ -336,7 +557,7 @@ print(f"Best episode #{best_idx + 1} with engagement metric={best_metric:.2f}")
 
 # Plot and animate best episode
 best = episodes[best_idx]
-best_info = f"Locks: {best[5]['total_locks']} | Hits: {best[5]['total_hits']} | HP: {best[5]['final_hp']}"
+best_info  = f"GoodLocks: {best[5]['good_locks']} | Hits: {best[5]['total_hits']} | Conv: {best[5]['lock_to_hit_conv']:.2f} | HP: {best[5]['final_hp']}"
 plot_traj_with_hits(best[0], best[1], best[2], best[3], 
                     f"best_episode_{best_idx + 1}", outdir, best_info)
 animate_traj_follow_zoom(best[0], best[1], best[2], best[3], 
@@ -345,7 +566,7 @@ animate_traj_follow_zoom(best[0], best[1], best[2], best[3],
 # Plot and animate worst episode
 worst_idx = int(np.argmin([e[4] for e in episodes]))
 worst = episodes[worst_idx]
-worst_info = f"Locks: {worst[5]['total_locks']} | Hits: {worst[5]['total_hits']} | HP: {worst[5]['final_hp']}"
+worst_info = f"GoodLocks: {worst[5]['good_locks']} | Hits: {worst[5]['total_hits']} | Conv: {worst[5]['lock_to_hit_conv']:.2f} | HP: {worst[5]['final_hp']}"
 plot_traj_with_hits(worst[0], worst[1], worst[2], worst[3], 
                     f"worst_episode_{worst_idx + 1}", outdir, worst_info)
 animate_traj_follow_zoom(worst[0], worst[1], worst[2], worst[3], 
@@ -355,7 +576,7 @@ animate_traj_follow_zoom(worst[0], worst[1], worst[2], worst[3],
 print(f"\n=== EVALUATION SUMMARY ===")
 print(f"Total episodes: {num_eps}")
 total_hits = sum(len(e[2]) + len(e[3]) for e in episodes)
-total_locks = sum(e[5]['total_locks'] for e in episodes)
+total_locks = sum(e[5]['good_locks'] for e in episodes)
 avg_length = np.mean([e[5]['episode_length'] for e in episodes])
     
 print(f"Total hits across all episodes: {total_hits}")
