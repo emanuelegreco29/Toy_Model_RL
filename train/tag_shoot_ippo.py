@@ -30,7 +30,7 @@ ent_coef = 0.03              # Lower entropy for more focused policies
 vf_coef = 0.5
 max_grad_norm = 0.5
 seed = 42
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cpu"
 save_interval = 25
 log_interval = 1
 tag = "Tag_Shoot_IPPO"
@@ -146,7 +146,7 @@ print(f"Device: {device}")
 for update in range(1, num_updates + 1):
     ent_coef_now = entropy_coef(update)
     total_updates = total_timesteps // steps_per_update
-    env.set_curriculum(progress=min(1.0, update / max(1, total_updates)))
+    #env.set_curriculum(progress=min(1.0, update / max(1, total_updates)))
 
     # accumuli per logging
     ep_returns_batch = {ag: [] for ag in agent_names}

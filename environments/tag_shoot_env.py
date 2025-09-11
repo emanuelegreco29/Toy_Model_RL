@@ -1,3 +1,4 @@
+
 import numpy as np
 import math
 from collections import deque
@@ -19,10 +20,6 @@ class TagShootEnv(ParallelEnv):
         self.max_steps = 500
         self.prev_dist = {ag: None for ag in self.agents}
         self.alpha_act = 0.2
-        # --- Arena bounds (hard walls) ---
-        self.bound_half = np.array([45.0, 45.0, 50.0], dtype=np.float32)  # semiestensioni box su (x,y,z)
-        self.bound_bounce_damping = 0.95   # smorzamento velocità dopo rimbalzo
-        self.bound_eps = 1e-4              # piccolo margine per rientrare nel box
         
         # --- WEZ Parameters ---
         self.wez_length = 5.0
@@ -31,45 +28,35 @@ class TagShootEnv(ParallelEnv):
         self.cooldown_frames = 5 # For how many steps the agent needs to wait before shooting again
         self.lock_counter = {ag: 0 for ag in self.agents}
         self.cooldown = {ag: 0 for ag in self.agents}
-        self.coast_counter = {ag: 0 for ag in self.agents} # Counter used to avoid coasting
-        # buffer eventi dell’ultimo step (usati da _compute_reward)
-        self._last_hit_shooters = set()
-        self._last_hit_victims  = set()
-        # reward/event weights (più danno, meno farm)
-        self.r_hit_reward  = 10.0   # premio se io colpisco
-        self.r_hit_penalty = 6.0   # penalità se vengo colpito
-        self.r_lock_tick   = 0.01  # shaping minimo per lock “buono”
-        self.lead_tau_max  = 1.8   # orizzonte massimo per il lead
-        
-        
-        self.pmd_lock_frac_start = 0.60   # all’inizio: PMD ammessa = 60% WEZ
-        self.pmd_lock_frac_end   = 0.35   # a regime: 35% WEZ
-        self.lead_lock_deg_start = 28.0   # più permissivo all’inizio
-        self.lead_lock_deg_end   = 22.0   # più stretto a regime
-        self.lock_required_start = 8
-        self.lock_required_end   = 12
-        self.r_lock_tick         = 0.005  # piccolo shaping SOLO su lock buono
-
-        # flag step->reward per sapere se il frame era “good_geom”
-        self._good_geom_flag = {ag: False for ag in self.agents}
-        
-        # --- Damping rimbalzi muro (fine-tuning pareti fisiche) ---
-        if hasattr(self, "bound_bounce_damping"):
-            self.bound_bounce_damping = 0.90  # prima 0.95
-
 
         # --- Agent controls ---
         self.delta_v = 0.15
-        self.yaw_rate_max = 1.8             # [rad/s] yaw rate limit
-        self.pitch_rate_max = 1.8           # [rad/s] pitch rate limit
+        self.yaw_rate_max = 1.2             # [rad/s] yaw rate limit
+        self.pitch_rate_max = 1.0           # [rad/s] pitch rate limit
         self.pitch_abs_max = math.radians(60.0)  # pitch limit
         self.v_max = 1.5
         self.v_min = 1.0
-        # --- Riferimento per normalizzare ω_LOS ---
-        self._losrate_ref = float(self.v_max / max(1e-6, self.wez_length))  # [rad/s] ~ v/WEZ
+
+        # >>> Disimpegno & soft walls (1d)
+        self.disengage_dist_factor = 3.0
+        self.disengage_steps_required = 50
+        self.disengage_counter = {ag: 0 for ag in self.agents}
+        self.soft_boundary = 30.0  # raggio "morbido" per x/y/z
+        
+        # >>> Eventi colpo (1b)
+        self.hit_reward_shooter = 6.0
+        self.hit_penalty_target = 7.0
+
+        # >>> Stato per 1b/1c/1e
+        self.prev_lock_progress = {ag: 0.0 for ag in self.agents}         # my lock (step precedente)
+        self.prev_enemy_lock_progress = {ag: 0.0 for ag in self.agents}   # enemy lock (step precedente)
+        self.prev_yaw = {ag: 0.0 for ag in self.agents}                   # per stimare yaw_rate
+        self.hit_decay = 0.9                                              # 1e
+        self.decayed_hit = {ag: 0.0 for ag in self.agents}                # 1e
+        self.prev_progress = {ag: 0.0 for ag in self.agents}
 
         # Observation space
-        obs_dim = 21
+        obs_dim = 20
         low = -np.inf * np.ones(obs_dim, dtype=np.float32)
         high =  np.inf * np.ones(obs_dim, dtype=np.float32)
         self.observation_spaces = {a: spaces.Box(low, high, dtype=np.float32)
@@ -110,11 +97,11 @@ class TagShootEnv(ParallelEnv):
         self.prev_act = {ag: np.zeros_like(self.prev_act[ag], dtype=np.float32) for ag in self.agents}
         self.prev_wez_status = {ag: False for ag in self.agents}
         self.episode_hits = {ag: 0 for ag in self.agents}
-        self.coast_counter = {ag: 0 for ag in self.agents}
-        self._good_geom_flag = {ag: False for ag in self.agents}
-        self._last_hit_shooters = set()
-        self._last_hit_victims = set()
-        self._diag = dict(los_rate_sum=0.0, pmd_sum=0.0, steps=0, good_lock_steps=0, lock_steps=0)
+        self.disengage_counter = {ag: 0 for ag in self.agents}
+        self.decayed_hit = {ag: 0.0 for ag in self.agents}
+        self.prev_lock_progress = {ag: 0.0 for ag in self.agents}
+        self.prev_enemy_lock_progress = {ag: 0.0 for ag in self.agents}
+        self.prev_progress = {ag: 0.0 for ag in self.agents}
 
         # Various initial configurations
         configs = ['chaser_adv', 'evader_adv', 'front', 'back', 'diagonal', 'vertical']
@@ -159,17 +146,18 @@ class TagShootEnv(ParallelEnv):
 
         # Randomize initial speeds
         speed = 1.0
+        self.prev_yaw = {ag: 0.0 for ag in self.agents}  # yaw iniziale
         
         # Assign initial state to each agent
-        for i, agent in enumerate(self.agents):
+        for agent in self.agents:
             if agent == 'Agent 0':
                 pos, yaw, pitch = ch_pos, yaw_cp, pitch_cp
             else:
                 pos, yaw, pitch = ep_pos, yaw_ep, pitch_ep
 
-            pos = np.clip(pos, -self.bound_half + self.bound_eps, self.bound_half - self.bound_eps)
             state = np.array([*pos, speed, yaw, pitch], dtype=np.float32)
             self.states[agent] = state
+            self.prev_yaw[agent] = float(yaw)
 
             # Reset HP
             self.hp[agent] = 100
@@ -196,91 +184,58 @@ class TagShootEnv(ParallelEnv):
         return obs, infos
 
     def _get_obs(self, agent):
-        """
-        Feature restituite:
-        - LOS unitario verso il target (3)
-        - distanza normalizzata (d / (4*WEZ)) in [0,1] tagliata a 1
-        - cos_point = nose_i · los           in [-1,1]
-        - cos_tail  = nose_j · los           in [-1,1]
-        - v_close (closure lungo LOS)        >0 se si chiude
-        - I_wez (0/1)
-        - v_i (velocità propria)
-        - yaw_i, pitch_i
-        - v_j (velocità avversario)
-        - enemy_hp (normalizzato su 100)
-        - aspect_to_me = nose_j · (-los)     in [-1,1]
-        - my_lock_progress  in [0,1]
-        - enemy_lock_progress in [0,1]
-        - 
-        """
         other = self._other(agent)
 
-        # Geometria di base
-        los, d   = self._los(agent, other)           # i -> j
-        ori_i    = self._orientation(agent)
-        ori_j    = self._orientation(other)
-        v_i      = ori_i['speed']
-        v_j      = ori_j['speed']
+        # Geometria primaria
+        los, d = self._los(agent, other)          # unitario, distanza
+        ori_i  = self._orientation(agent)
+        ori_j  = self._orientation(other)
 
-        # Allineamenti (in [-1,1])
-        cos_point      = float(np.clip(np.dot(ori_i['nose'], los), -1.0, 1.0))       # io verso il target
-        cos_tail       = float(np.clip(np.dot(ori_j['nose'], los), -1.0, 1.0))       # j scappa lungo LOS
-        cos_enemy_on_me= float(np.clip(np.dot(ori_j['nose'], -los), -1.0, 1.0))      # j mi punta
+        # Closure: positivo se la distanza si riduce
+        v_close = float(self._closure(agent, other))
 
-        # Lead pursuit (unit vector che anticipa il target)
-        lead_dir = self._lead_unit(agent, other)     # già normalizzata
-        cos_lead = float(np.clip(np.dot(ori_i['nose'], lead_dir), -1.0, 1.0))
+        # Indicatori tattici
+        I_wez = 1.0 if self._in_wez(agent) else 0.0
+        enemy_hp = float(self.hp[other] / 100.0)
 
-        # Closure normalizzata a [0,1]
-        c       = self._closure(agent, other)
-        c_norm  = float(np.clip(c / max(1e-6, 2.0*self.v_max), -1.0, 1.0))
-        f_close = 0.5 * (1.0 + c_norm)
+        # Puntamento e "tail"
+        cos_point = float(np.clip(np.dot(ori_i['nose'], los), -1.0, 1.0))
+        cos_tail  = float(np.clip(np.dot(ori_j['nose'], los), -1.0, 1.0))
 
-        # WEZ
-        I_my_wez    = 1.0 if self._in_wez(agent) else 0.0
-        I_enemy_wez = 1.0 if self._in_wez(other) else 0.0
+        # Aspect dell'avversario verso di noi (n_j con -los)
+        aspect_to_me = float(np.clip(np.dot(ori_j['nose'], -los), -1.0, 1.0))
 
-        # Distanza normalizzata rispetto alla WEZ (clamp a 1)
-        d_norm = float(min(d / max(1e-6, self.wez_length), 1.0))
+        # Progressi lock normalizzati
+        my_lock_progress    = float(self.lock_counter[agent] / max(1, self.lock_required))
+        enemy_lock_progress = float(self.lock_counter[other] / max(1, self.lock_required))
 
-        # Rapporto velocità (clamp a [0,1.5] e poi riscalo a [0,1])
-        v_ratio = float(np.clip(v_i / max(0.1, v_j), 0.0, 1.5)) / 1.5
-        
-        los_rate, pmd = self._los_rate_and_pmd(agent, self._other(agent))
-        los_rate_norm = float(np.clip(los_rate / max(1e-6, self._losrate_ref), 0.0, 1.0))
-        pmd_norm = float(np.clip(pmd / max(1e-6, self.wez_length), 0.0, 1.0))
-        
-        # Componenti radiali, tangenziali della velocità e coplanarità dell'orbita
-        vr, vt, cos_orb, d_now = self._relative_components(agent, self._other(agent))
-        vr_norm = float(np.clip(vr / max(1e-6, self.v_max), -1.0, 1.0))          # [-1,1]
-        vt_norm = float(np.clip(vt / max(1e-6, self.v_max), 0.0, 1.0))           # [0,1]
-        cos_orb_norm = float(cos_orb)                                            # [-1,1]
-        # opzionale: distanza alla “ring-radius” normalizzata (aiuta la stabilità)
-        ring_r = 0.6 * float(self.wez_length)
-        ring_err = float(np.clip((d_now - ring_r) / max(1e-6, ring_r), -1.0, 1.0))
+        # Distanza normalizzata su scala 4*WEZ
+        d_norm = float(min(d / max(1e-6, 4.0 * self.wez_length), 1.0))
+
+        # --- 1e: nuove feature osservabili ---
+        enemy_cooldown_norm = float(self.cooldown[other] / max(1, self.cooldown_frames))
+        was_hit_decay = float(self.decayed_hit[agent])  # [0,1] con decadimento esponenziale
+        d_my_lock = float(np.clip(my_lock_progress - self.prev_lock_progress[agent], -1.0, 1.0))
+        d_enemy_lock = float(np.clip(enemy_lock_progress - self.prev_enemy_lock_progress[agent], -1.0, 1.0))
 
         obs = np.array([
-            # LOS (3)
-            los[0], los[1], los[2],
-            # distanza e velocità (2)
-            d_norm, v_ratio,
-            # allineamenti e lead (4)
-            cos_point, cos_tail, cos_lead, cos_enemy_on_me,
-            # closure (1)
-            f_close,
-            # WEZ (2)
-            I_my_wez, I_enemy_wez,
-            # velocità normalizzate assolute (2) per stabilità del controllo
-            v_i / max(1e-6, self.v_max),
-            v_j / max(1e-6, self.v_max),
-            # margine laterale (1): componente perpendicolare della prua rispetto alla LOS
-            float(np.linalg.norm(np.cross(ori_i['nose'], los))),
-            los_rate_norm,  # tasso di variazione della LOS normalizzato (1)
-            pmd_norm,       # miss distance predetta normalizzata (1)
-            vr_norm,      # componente radiale normalizzata (1)
-            vt_norm,      # componente tangenziale normalizzata (1)
-            cos_orb_norm, # coplanarità dell'orbita (1)
-            ring_err,     # errore sulla ring-radius normalizzato (1)
+            los[0], los[1], los[2],           # 0-2: LOS
+            d_norm,                           # 3:   distanza normalizzata
+            cos_point,                        # 4
+            cos_tail,                         # 5
+            v_close,                          # 6:   closure (>0 se chiudiamo)
+            I_wez,                            # 7
+            ori_i['speed'],                   # 8:   v_i
+            ori_i['yaw'], ori_i['pitch'],     # 9-10: yaw_i, pitch_i
+            ori_j['speed'],                   # 11:  v_j
+            enemy_hp,                         # 12
+            aspect_to_me,                     # 13
+            my_lock_progress,                 # 14
+            enemy_lock_progress,              # 15
+            enemy_cooldown_norm,              # 16  (NUOVO)
+            was_hit_decay,                    # 17  (NUOVO)
+            d_my_lock,                        # 18  (NUOVO)
+            d_enemy_lock                      # 19  (NUOVO)
         ], dtype=np.float32)
 
         return obs
@@ -289,7 +244,7 @@ class TagShootEnv(ParallelEnv):
         rewards = {ag: 0.0 for ag in self.agents}
         infos = {ag: {} for ag in self.agents}
 
-        # Update agents states
+        # Update agents states (come prima: smoothing + integrazione)
         for ag, act in action_dict.items():
             st = self.states[ag].copy()
 
@@ -301,93 +256,115 @@ class TagShootEnv(ParallelEnv):
             x, y, z, v, yaw, pitch = st
             dv, yaw_rate, pitch_rate = smoothed
 
-            # Compute the changes in state
             v_min, v_max = float(self.v_min), float(self.v_max)
             v = float(np.clip(v + dv, v_min, v_max))
 
             yaw = float(((yaw + float(np.clip(yaw_rate, -self.yaw_rate_max, self.yaw_rate_max)) * self.dt + np.pi) % (2.0 * np.pi)) - np.pi)
-
             pitch = float(np.clip(
                 pitch + float(np.clip(pitch_rate, -self.pitch_rate_max, self.pitch_rate_max)) * self.dt,
                 -self.pitch_abs_max, self.pitch_abs_max
             ))
 
-            # Update state
             dx = v * math.cos(pitch) * math.cos(yaw) * self.dt
             dy = v * math.cos(pitch) * math.sin(yaw) * self.dt
             dz = v * math.sin(pitch) * self.dt
 
-            # new = np.array([x + dx, y + dy, z + dz, v, yaw, pitch], dtype=np.float32)
-            # self.states[ag] = new
             new = np.array([x + dx, y + dy, z + dz, v, yaw, pitch], dtype=np.float32)
-            new = self._apply_bounds(new)
             self.states[ag] = new
 
         # Advance time
         self.current_step += 1
 
-        # Shooting
-        hits = []
+        # Disimpegno: conta quando la distanza supera soglia (1d)
+        # Distanze correnti
+        dist_now = {}
+        for ag in self.agents:
+            other = self._other(ag)
+            d = float(np.linalg.norm(self.states[ag][:3] - self.states[other][:3]))
+            dist_now[ag] = d
 
+        # Reward base
+        for ag in self.agents:
+            rewards[ag] = float(self._compute_reward(ag))
+            # Penalità lieve se troppo lontani (> 3*WEZ), per step
+            if dist_now[ag] > 3.0 * self.wez_length:
+                overflow = (dist_now[ag] - 3.0 * self.wez_length) / max(1e-6, self.wez_length)
+                rewards[ag] -= 0.02 * min(3.0, overflow)   # ~0.02–0.06 per step
+
+        # Shooting (1b): lock gain/rafforzato + eventi colpo con flag "hit" per 1e
+        hits = []
         for ag in self.agents:
             prev_wez = self.prev_wez_status[ag]
             curr_wez = self._in_wez(ag)
             self.prev_wez_status[ag] = curr_wez
-            
-            # Lock accumulation gated by WEZ and cooldown
-            good_geom = self._update_lock_gated(ag, curr_wez)
-            self._good_geom_flag[ag] = bool(good_geom)
-            if good_geom:
-                self.total_lock[ag] += 1
 
-            # Shoot if lock requirement met
+            # WEZ entry bonus (lieve)
+            if not prev_wez and curr_wez:
+                rewards[ag] += 0.1
+
+            # Lock accumulation gated by WEZ and cooldown
+            if curr_wez and (self.cooldown[ag] == 0):
+                self.lock_counter[ag] += 1
+                self.total_lock[ag] += 1
+                # piccolo shaping additivo per mantenere il lock
+                rewards[ag] += 0.1
+            else:
+                self.lock_counter[ag] = 0
+
+            # Shoot se lock requirement soddisfatto
             if self.lock_counter[ag] >= self.lock_required and self.cooldown[ag] == 0:
                 hits.append(ag)
 
-        # Apply hits simultaneously
-        self._last_hit_shooters = set()
-        self._last_hit_victims = set()
+        # Applica colpi simultaneamente (1b) + aggiorna segnale "was_hit" (1e)
         for ag in hits:
             other = self._other(ag)
+            rewards[ag] += self.hit_reward_shooter     # +6
+            rewards[other] -= self.hit_penalty_target  # -7
             self.hp[other] = max(0, int(self.hp[other]) - 10)
             self.lock_counter[ag] = 0
             self.cooldown[ag] = self.cooldown_frames
             self.episode_hits[ag] += 1
-            self._last_hit_shooters.add(ag)
-            self._last_hit_victims.add(other)
+            self.decayed_hit[other] = 1.0  # impulsa il segnale "sono stato colpito"
 
         # Cooldown tick
         for ag in self.agents:
             if self.cooldown[ag] > 0:
                 self.cooldown[ag] -= 1
-                
-        rewards = {ag: self._compute_reward(ag) for ag in self.agents}
-        self._last_hit_shooters.clear()
-        self._last_hit_victims.clear()
 
         # Termination conditions
-        term = (
-            self.current_step >= self.max_steps
-            or self.hp['Agent 0'] <= 0
-            or self.hp['Agent 1'] <= 0
-        )
-                
+        term_time = (self.current_step >= self.max_steps)
+        term_hp = (self.hp['Agent 0'] <= 0) or (self.hp['Agent 1'] <= 0)
+        term = term_time or term_hp
+
+        # End of episode shaping (1b/1d)
+        if term:
+            # Differenziale HP (premia chi ha più HP residua)
+            for ag in self.agents:
+                other = self._other(ag)
+                rewards[ag] += 0.1 * float(self.hp[ag] - self.hp[other])  # 1b
+                rewards[ag] += 0.1 * self.episode_hits[ag]                # tieni il bonus hit-count
+
         dones = {ag: term for ag in self.agents}
         dones['__all__'] = term
 
+        # Osservazioni aggiornate
         obs = {ag: self._get_obs(ag) for ag in self.agents}
         global_state = np.concatenate([obs[a] for a in self.agents], axis=0)
 
-        # Update previous distances
-        for agent in self.agents:
-            other = self._other(agent)
-            self.prev_dist[agent] = float(np.linalg.norm(self.states[agent][:3] - self.states[other][:3]))
+        # Aggiorna "previous" per la prossima step (1b/1c/1e)
+        for ag in self.agents:
+            other = self._other(ag)
+            self.prev_dist[ag] = float(np.linalg.norm(self.states[ag][:3] - self.states[other][:3]))
+            self.prev_yaw[ag] = float(self.states[ag][4])
+            self.prev_lock_progress[ag] = float(self.lock_counter[ag] / max(1, self.lock_required))
+            self.prev_enemy_lock_progress[ag] = float(self.lock_counter[other] / max(1, self.lock_required))
+            self.decayed_hit[ag] *= self.hit_decay  # decadimento (1e)
 
         # Infos
         for ag in self.agents:
             other = self._other(ag)
             infos[ag].update({
-                'distance': float(np.linalg.norm(self.states[ag][:3] - self.states[other][:3])),
+                'distance': dist_now[ag],
                 'Total Lock': int(self.total_lock[ag]),
                 'Agent 0 HP': int(self.hp['Agent 0']),
                 'Agent 1 HP': int(self.hp['Agent 1']),
@@ -397,214 +374,107 @@ class TagShootEnv(ParallelEnv):
 
         return obs, rewards, dones, infos
 
-    """ A helper to get the opposing agent's name """
-    def _other(self, agent):
-        return self.agents[1] if agent == self.agents[0] else self.agents[0]
-
-    def _compute_reward(self, agent: str, weights: dict | None = None) -> float:
+    def _compute_reward(self, agent, *_):
         """
-        Reward pulita e non farmabile:
-        - pesi spostati sugli HIT
-        - una sola penalità 'threat'
-        - anti-coast coerente e più leggero
-        - shaping WEZ minimo + comfort ridotto
-        - gestione degli eventi di tiro qui (hit a favore/contro)
+        Reward "a fasi" per evitare il volo parallelo e guidare l'ingaggio:
+        - FAR   (d > 2*WEZ): priorità CHIUSURA + puntare la LOS (point)
+        - MID   (WEZ < d ≤ 2*WEZ): costruzione della coda (point + behind), front_pen moderata
+        - CLOSE (d ≤ WEZ): stare dietro e mantenere la posizione (behind forte, front_pen forte), min. z-gap,
+                            minaccia attiva solo se l'altro ci punta davvero in WEZ
+        - Anti-parallel: penalizza "stesso verso" + scarso point + poca chiusura a distanza medio/lunga
+        - Lock shaping minimo: piccolo bonus step in WEZ ben puntati + bonus al differenziale di lock
         """
         other = self._other(agent)
 
-        # --- base geometry ---
-        los, d  = self._los(agent, other)
-        ori_i   = self._orientation(agent)
-        ori_j   = self._orientation(other)
-        wez     = float(self.wez_length)
-        v_max   = float(self.v_max)
+        # --- Geometria di base ---
+        agent_pos  = self.states[agent][:3]
+        target_pos = self.states[other][:3]
+        los, d     = self._los(agent, other)             # i -> j
+        ori_i      = self._orientation(agent)
+        ori_j      = self._orientation(other)
 
-        # allineamenti
-        cos_point = float(np.clip(np.dot(ori_i['nose'], los), -1.0, 1.0))
-        f_point   = 0.5 * (1.0 + cos_point)
+        my_dir     = ori_i['nose']
+        target_dir = ori_j['nose']
 
-        cos_tail  = float(np.clip(np.dot(ori_j['nose'], los), -1.0, 1.0))
-        f_tail    = 0.5 * (1.0 + cos_tail)
+        # vettore target->agente e "dietro/avanti" rispetto alla direzione del target
+        vec = agent_pos - target_pos
+        d_safe = float(max(np.linalg.norm(vec), 1e-8))
+        pos_dir = vec / d_safe
+        cos_pos = float(np.clip(np.dot(pos_dir, target_dir), -1.0, 1.0))  # >0 = siamo davanti
+        behind  = 0.5 * (1.0 - cos_pos)                                   # grande se dietro [0,1]
+        front_pen = max(0.0, cos_pos)                                      # penalità di front
 
-        # lead pursuit (intercetto)
-        lead_dir  = self._lead_unit(agent, other)
-        cos_lead  = float(np.clip(np.dot(ori_i['nose'], lead_dir), -1.0, 1.0))
-        f_lead    = 0.5 * (1.0 + cos_lead)
+        # puntare la LOS (ruotare verso il bersaglio)
+        cos_point = float(np.clip(np.dot(my_dir, los), -1.0, 1.0))
+        point = 0.5 * (1.0 + cos_point)                                    # [0,1]
 
-        # closure in [0,1]
-        closure   = self._closure(agent, other)
-        c_norm    = float(np.clip(closure / max(1e-6, 2.0*v_max), -1.0, 1.0))
-        f_close   = 0.5 * (1.0 + c_norm)
+        # stessa rotta del target (serve per anti-parallel)
+        cos_vel = float(np.clip(np.dot(my_dir, target_dir), -1.0, 1.0))
 
-        # banda "comfort" molto debole (picco poco fuori dalla WEZ)
-        center    = 0.8 * wez
-        width     = 0.5 * wez
-        f_band    = float(np.exp(-0.5 * ((d - center) / max(1e-6, width))**2))  # 0..1
+        # chiusura positiva
+        c = self._closure(agent, other)
+        c_norm = float(np.clip(c / max(1e-6, 2.0*self.v_max), -1.0, 1.0))
+        close_pos = max(0.0, c_norm)                                       # solo se stiamo chiudendo
 
-        # minaccia (singola)
-        cos_threat  = float(np.clip(np.dot(ori_j['nose'], -los), -1.0, 1.0))
-        f_threat    = 0.5 * (1.0 + cos_threat)
+        # z-gap (riduce fuga in quota quando vicini)
+        z_gap_norm = abs(float(self.states[agent][2] - self.states[other][2])) / max(1e-6, self.wez_length)
+        z_gap_norm = float(np.clip(z_gap_norm, 0.0, 1.5))
+
+        # minaccia SOLO in WEZ nemica e se davvero ci punta
         I_enemy_wez = 1.0 if self._in_wez(other) else 0.0
-        I_my_wez    = 1.0 if self._in_wez(agent) else 0.0
+        cos_enemy_on_me = float(np.clip(np.dot(target_dir, -los), -1.0, 1.0))
+        threat_hard_gate = 1.0 if (I_enemy_wez == 1.0 and cos_enemy_on_me > 0.95) else 0.0
+        f_threat = 0.5 * (1.0 + cos_enemy_on_me)                            # [0,1]
 
-        # ---- somma pesata (ridotti i termini "farmabili") ----
-        reward = (
-            0.25 * f_point +
-            0.03 * f_tail  +
-            0.30 * f_close +
-            0.22 * f_lead  +
-            0.03 * f_band
-        )
-        # penalità
-        reward -= 0.25 * f_threat
-        reward -= 0.45 * I_enemy_wez
+        # --- Anti-parallel (evita volo affiancato) ---
+        # alto quando: stesse direzioni, scarso point, poca chiusura, distanza non troppo corta
+        wez = float(self.wez_length)
+        s_align = max(0.0, (cos_vel - 0.80) / 0.20)                         # 0..1 se molto allineati
+        s_unpoint = max(0.0, (0.60 - point) / 0.60)                          # 0..1 se non stiamo puntando la LOS
+        s_far = float(np.clip((d - 0.6*wez) / (0.8*wez), 0.0, 1.0))          # attivo da 0.6*WEZ a 1.4*WEZ+
+        s_noclose = 1.0 - close_pos                                          # 1 se non stiamo chiudendo
+        anti_parallel = s_align * s_unpoint * s_far * s_noclose              # 0..1
 
-        # piccolo boost solo se davvero ingaggio “sensato” nella mia WEZ
-        if I_my_wez and (closure > 0.0) and (cos_point >= self.wez_cos_threshold):
-            reward += 0.02
+        # --- Fasi per distanza ---
+        far_thr  = 2.0 * wez
+        near_thr = 1.0 * wez
 
-        # shaping minimo per lock “buono” (non farmabile perché già gated sopra)
-        if self._good_geom_flag.get(agent, False):
-            reward += self.r_lock_tick
+        reward = 0.0
 
-        # anti-coast più leggero (usa il contatore interno)
-        reward -= 0.12 * self._anti_coasting(agent, los, d, ori_i, closure)
-        
-        los_u, d_ij = self._los(agent, self._other(agent))
-        ori = self._orientation(agent)
-        in_wez = (d_ij <= float(self.wez_length)) and (float(np.dot(ori['nose'], los_u)) >= float(self.wez_cos_threshold))
-        if in_wez:
-            los_rate, pmd = self._los_rate_and_pmd(agent, self._other(agent))
-            f_pmd = math.exp(-0.5 * (pmd / max(1e-6, 0.5 * float(self.wez_length)))**2)
-            f_los = float(np.clip(los_rate / max(1e-6, float(self._losrate_ref)), 0.0, 1.0))
-            reward += 0.10 * f_pmd + 0.05 * f_los
+        if d > far_thr:
+            # LONTANO: chiudi e punta la LOS (niente front/threat)
+            reward += 0.60 * close_pos + 0.40 * point
+            reward -= 0.30 * anti_parallel
 
-        # ---- eventi di tiro (settati in step) ----
-        if agent in self._last_hit_shooters:
-            reward += self.r_hit_reward
-        if agent in self._last_hit_victims:
-            reward -= self.r_hit_penalty
-            
-        # ----- ORBITAL PURSUIT SHAPING -----
-        vr, vt, cos_orb, d_now = self._relative_components(agent, other)
-        I_my_wez = 1.0 if self._in_wez(agent) else 0.0
+        elif d > near_thr:
+            # MEDIO: costruisci coda, evita parallelo
+            reward += 0.40 * point + 0.30 * behind + 0.30 * close_pos
+            reward -= 0.30 * front_pen
+            reward -= 0.35 * anti_parallel
 
-        # target anello
-        r0      = 0.6 * float(self.wez_length)
-        sig_r   = 0.18 * r0                # spessore “buono”
-        ring_ok = math.exp(-0.5 * ((d_now - r0) / max(1e-6, sig_r))**2)  # 0..1
-
-        # normalizzazioni robuste
-        vr_n = np.clip(vr / max(1e-6, self.v_max), -1.0, 1.0)      # [-1,1]
-        vt_n = np.clip(vt / max(1e-6, self.v_max), 0.0, 1.0)       # [0,1]
-        cos_o = np.clip(cos_orb, -1.0, 1.0)                        # [-1,1]
-
-        # desidero un “closing” lieve in anello (evita orbiting sterile)
-        vr_t   = 0.10 * self.v_max
-        sig_vr = 0.15 * self.v_max
-        vr_ok  = math.exp(-0.5 * ((vr - vr_t) / max(1e-6, sig_vr))**2)     # 0..1
-
-        if I_my_wez:
-            # dentro WEZ: spingi a orbitare stretto e co-pianare, con lieve closing
-            reward += 0.12 * ring_ok
-            reward += 0.10 * float(vt_n)
-            reward += 0.07 * float(0.5 * (1.0 + cos_o))  # mappa [-1,1] -> [0,1]
-            reward += 0.08 * vr_ok
         else:
-            # fuori WEZ: semplicità → chiudi e curva (porta dentro)
-            reward += 0.05 * max(0.0, vr_n)     # solo closing
-            reward += 0.03 * float(vt_n)
+            # VICINO: stare dietro e mantenere
+            reward += 0.50 * behind + 0.30 * point + 0.10 * close_pos
+            reward -= 0.60 * front_pen
+            reward -= 0.10 * float(np.clip(z_gap_norm, 0.0, 1.0))
+            reward -= 0.50 * threat_hard_gate * f_threat                     # minaccia forte solo se reale
 
-        # PMD / ω_LOS (già presenti): tienili, ma riduci a 0.08 / 0.04 se ora “spingono troppo”
-        if I_my_wez:
-            los_rate, pmd = self._los_rate_and_pmd(agent, self._other(agent))
-            f_pmd = math.exp(-0.5 * (pmd / max(1e-6, 0.5 * float(self.wez_length)))**2)
-            f_los = float(np.clip(los_rate / max(1e-6, float(self._losrate_ref)), 0.0, 1.0))
-            reward += 0.08 * f_pmd + 0.04 * f_los
-
-        # traccia distanza
-        if hasattr(self, "prev_dist"):
-            self.prev_dist[agent] = d
+            # Lock shaping minimo: piccolo bonus se in WEZ e ben puntati, + differenziale di lock
+            I_my_wez = 1.0 if self._in_wez(agent) else 0.0
+            if cos_point > math.cos(math.radians(20.0)) and I_my_wez == 1.0:
+                reward += 0.02
+            # bonus sul differenziale di lock progress
+            if not hasattr(self, "_prev_lock_norm"):
+                self._prev_lock_norm = {a: 0.0 for a in self.agents}
+            my_lp = float(self.lock_counter[agent] / max(1, self.lock_required))
+            d_my_lp = max(0.0, my_lp - float(self._prev_lock_norm.get(agent, 0.0)))
+            reward += 0.05 * d_my_lp
+            self._prev_lock_norm[agent] = my_lp
 
         return float(reward)
-    
-    def _apply_bounds(self, state: np.ndarray) -> np.ndarray:
-        """
-        Applica limiti fisici di un box axis-aligned:
-        - Clippa la posizione al bordo
-        - Riflette la direzione di moto rispetto alla normale del muro
-        - Applica uno smorzamento di velocità (bound_bounce_damping)
-        Restituisce lo stato modificato [x,y,z,v,yaw,pitch].
-        """
-        x, y, z, v, yaw, pitch = map(float, state)
-        p = np.array([x, y, z], dtype=np.float64)
-        H = self.bound_half.astype(np.float64)
 
-        # velocità vettoriale corrente
-        vx = v * math.cos(pitch) * math.cos(yaw)
-        vy = v * math.cos(pitch) * math.sin(yaw)
-        vz = v * math.sin(pitch)
-        vv = np.array([vx, vy, vz], dtype=np.float64)
-
-        collided = False
-
-        # per ogni asse, clamp + riflessione
-        for k in (0, 1, 2):
-            if p[k] < -H[k]:
-                p[k] = -H[k] + self.bound_eps
-                n = np.zeros(3, dtype=np.float64); n[k] = 1.0   # normale verso l'interno
-                vv = vv - 2.0 * np.dot(vv, n) * n
-                collided = True
-            elif p[k] > H[k]:
-                p[k] = H[k] - self.bound_eps
-                n = np.zeros(3, dtype=np.float64); n[k] = -1.0  # normale verso l'interno
-                vv = vv - 2.0 * np.dot(vv, n) * n
-                collided = True
-
-        if collided:
-            v_new = float(np.linalg.norm(vv))
-            if v_new < 1e-8:
-                # fallback stabile
-                dir_hat = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                v_new = float(self.v_min)
-            else:
-                dir_hat = vv / v_new
-                v_new = float(np.clip(v_new * self.bound_bounce_damping, self.v_min, self.v_max))
-
-            yaw = float(math.atan2(dir_hat[1], dir_hat[0]))
-            pitch = float(math.atan2(dir_hat[2], math.sqrt(dir_hat[0]**2 + dir_hat[1]**2)))
-            v = v_new
-
-        return np.array([p[0], p[1], p[2], v, yaw, pitch], dtype=np.float32)
-
-    def _lead_los(self, agent, target=None, k: float = 0.7, tau_max: float = 3.0):
-        """
-        Direzione di intercetto 'lead' (unitaria) dall'agent verso
-        la posizione predetta del target.
-        k: fattore per smorzare il tempo di anticipo.
-        tau_max: bound sul tempo di anticipo.
-        """
-        if target is None:
-            target = self._other(agent)
-
-        # geometria attuale
-        p_i = self.states[agent][:3]
-        p_j = self.states[target][:3]
-        (los, d) = self._los(agent, target)
-        oi = self._orientation(agent)
-        oj = self._orientation(target)
-
-        # tempo di anticipo ~ distanza / nostra velocità (smorzato e clampato)
-        v_i = max(1e-6, oi['speed'])
-        tau = min(k * (d / v_i), tau_max)
-
-        # posizione predetta del target e nuova LOS
-        p_j_pred = p_j + oj['nose'] * oj['speed'] * tau
-        r = p_j_pred - p_i
-        n = float(np.linalg.norm(r))
-        if n < 1e-8:
-            return los  # fallback stabile
-        return (r / n).astype(np.float32)
+    def _other(self, agent):
+        return self.agents[1] if agent == self.agents[0] else self.agents[0]
 
     def _nose_vec(self, agent):
         """Restituisce il vettore "nose" dell'agente."""
@@ -666,7 +536,7 @@ class TagShootEnv(ParallelEnv):
 
         los, _ = self._los(agent, target)
         v_rel = self._speed_vec(agent) - self._speed_vec(target)
-        return -float(np.dot(v_rel, los))
+        return float(np.dot(v_rel, los))
 
     def _in_wez(self, shooter):
         """
@@ -681,131 +551,9 @@ class TagShootEnv(ParallelEnv):
         cos_nose = float(np.dot(self._nose_vec(shooter), los))
         return (d <= self.wez_length) and (cos_nose >= self.wez_cos_threshold)
 
-    def set_curriculum(self, progress: float):
-        """
-        progress in [0,1]: da facile a difficile.
-        - Distanze di start più grandi e orientamenti meno favorevoli col progredire.
-        - WEZ si stringe leggermente e il lock richiede più passi.
-        """
-        p = float(np.clip(progress, 0.0, 1.0))
-        # parametri cinematici
-        self.yaw_rate_max   = 1.2 + 0.6 * p       # più agile con il tempo
-        self.pitch_rate_max = 1.0 + 0.5 * p
-        # WEZ/lock
-        self.wez_length     = 6.0 - 1.5 * p       # WEZ un po' più stretto col tempo
-        self.lock_required  = int(6 + 6 * p)      # da 6 a 12
-        # memorizza per reset
-        self._curriculum_p  = p
-
-    def _anti_coasting(self, agent, los, d, ori_i, closure):
-        """
-        Penalità progressiva se l'agente 'veleggia' allineato ma senza chiudere.
-        Ritorna un valore in [0,1] da sottrarre alla reward (scale esterna).
-        """
-        wez = float(self.wez_length)
-        cos_point = float(np.clip(np.dot(ori_i['nose'], los), -1.0, 1.0))
-        # gating: molto allineato, poca chiusura, abbastanza lontano
-        is_coast = (cos_point > 0.9) and (closure < 0.02) and (d > 0.75 * wez)
-        if is_coast:
-            self.coast_counter[agent] = min(self.coast_counter[agent] + 1, 50)
-        else:
-            self.coast_counter[agent] = max(self.coast_counter[agent] - 2, 0)
-        x = self.coast_counter[agent] / 50.0
-        return x * x  # curva dolce 0..1
-
-    def _lead_unit(self, agent: str, other: str, t_lead: float | None = None) -> np.ndarray:
-        """
-        Direzione di ingaggio 'lead' (unitaria) dal punto di vista di `agent`,
-        puntando alla posizione futura stimata del bersaglio `other`.
-
-        t_lead default: tempo necessario a coprire la distanza attuale con v_max.
-        """
-        s_i = self.states[agent]
-        s_j = self.states[other]
-
-        p_i = s_i[:3].astype(np.float64)
-        p_j = s_j[:3].astype(np.float64)
-
-        # yaw/pitch -> versore velocità (assumiamo modulo ~ v_max)
-        yaw_j   = float(s_j[4]); pitch_j = float(s_j[5])
-        cp = np.cos(pitch_j)
-        vhat_j = np.array([cp*np.cos(yaw_j), cp*np.sin(yaw_j), np.sin(pitch_j)], dtype=np.float64)
-
-        rel = p_j - p_i
-        d = float(np.linalg.norm(rel))
-        if d < 1e-8:
-            return np.array([1.0, 0.0, 0.0], dtype=np.float64)
-
-        if t_lead is None:
-            t_lead = d / max(1e-6, float(self.v_max))  # grezza ma stabile
-
-        p_j_future = p_j + vhat_j * float(self.v_max) * t_lead
-        v = p_j_future - p_i
-        n = np.linalg.norm(v)
-        return v / n if n > 1e-8 else rel / d
-
-    def _los_rate_and_pmd(self, agent: str, target: str | None = None) -> tuple[float, float]:
-        if target is None:
-            target = self._other(agent)
-        p_i = self.states[agent][:3].astype(np.float64)
-        p_j = self.states[target][:3].astype(np.float64)
-        v_i = self._speed_vec(agent)
-        v_j = self._speed_vec(target)
-        r = p_j - p_i
-        d2 = float(np.dot(r, r)) + 1e-12
-        v_rel = v_j - v_i
-        # |ω_LOS| = || v_rel × r || / |r|^2
-        los_rate = float(np.linalg.norm(np.cross(v_rel, r)) / d2)
-        # PMD = || r × v_rel || / || v_rel ||
-        vrel_n = float(np.linalg.norm(v_rel)) + 1e-12
-        pmd = float(np.linalg.norm(np.cross(r, v_rel)) / vrel_n)
-        return los_rate, pmd
-
-    def _update_lock_gated(self, agent: str, curr_wez: bool) -> bool:
-        """Aggiorna lock_counter con gating di qualità. Ritorna good_geom (bool)."""
-        tgt = self._other(agent)
-        los_u, _ = self._los(agent, tgt)
-        ori = self._orientation(agent)  # deve avere 'nose'
-        lead_u = self._lead_unit(agent, tgt)
-        closure = self._closure(agent, tgt)
-        _, pmd = self._los_rate_and_pmd(agent, tgt)
-        
-        pmd_thr  = float(getattr(self, "pmd_lock_frac", self.pmd_lock_frac_end)) * float(self.wez_length)
-        lead_cos = float(np.cos(np.radians(getattr(self, "lead_lock_deg", self.lead_lock_deg_end))))
-
-        good_geom = (
-            bool(curr_wez) and
-            (self.cooldown[agent] == 0) and
-            (closure > 0.0) and
-            (float(np.dot(ori['nose'], los_u))  >= float(self.wez_cos_threshold)) and
-            (float(np.dot(ori['nose'], lead_u)) >= lead_cos) and
-            (pmd <= pmd_thr)
-        )
-        if good_geom:
-            self.lock_counter[agent] += 1
-        else:
-            self.lock_counter[agent] = 0
-        return good_geom
-
-    def _relative_components(self, agent: str, target: str | None = None):
-        if target is None:
-            target = self._other(agent)
-        p_i = self.states[agent][:3].astype(np.float64)
-        p_j = self.states[target][:3].astype(np.float64)
-        v_i = self._speed_vec(agent).astype(np.float64)
-        v_j = self._speed_vec(target).astype(np.float64)
-        r = p_j - p_i
-        d = float(np.linalg.norm(r)) + 1e-12
-        los = r / d
-        v_rel = v_i - v_j
-        vr = -float(np.dot(v_rel, los))                         # >0 se chiudi
-        vt = float(np.linalg.norm(np.cross(v_rel, los)))        # tangenziale
-        h_i = np.cross(r, v_i); h_j = np.cross(r, v_j)
-        nh_i = np.linalg.norm(h_i); nh_j = np.linalg.norm(h_j)
-        cos_orbit = 0.0
-        if nh_i > 1e-9 and nh_j > 1e-9:
-            cos_orbit = float(np.clip(np.dot(h_i, h_j) / (nh_i * nh_j), -1.0, 1.0))
-        return vr, vt, cos_orbit, d
+    def _angle_diff(self, a: float, b: float) -> float:
+        # ritorna a-b in (-pi, pi]
+        return float((a - b + math.pi) % (2.0 * math.pi) - math.pi)
 
     def render(self, mode='human'):
         print("Agent 0:", self.states['Agent 0'][:3], 
