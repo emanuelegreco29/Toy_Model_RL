@@ -557,7 +557,7 @@ print(f"Best episode #{best_idx + 1} with engagement metric={best_metric:.2f}")
 
 # Plot and animate best episode
 best = episodes[best_idx]
-best_info  = f"GoodLocks: {best[5]['good_locks']} | Hits: {best[5]['total_hits']} | Conv: {best[5]['lock_to_hit_conv']:.2f} | HP: {best[5]['final_hp']}"
+best_info  = f"Locks: {best[5]['good_locks']} | Hits: {best[5]['total_hits']} | Conv: {best[5]['lock_to_hit_conv']:.2f} | HP: {best[5]['final_hp']}"
 plot_traj_with_hits(best[0], best[1], best[2], best[3], 
                     f"best_episode_{best_idx + 1}", outdir, best_info)
 animate_traj_follow_zoom(best[0], best[1], best[2], best[3], 
@@ -566,7 +566,7 @@ animate_traj_follow_zoom(best[0], best[1], best[2], best[3],
 # Plot and animate worst episode
 worst_idx = int(np.argmin([e[4] for e in episodes]))
 worst = episodes[worst_idx]
-worst_info = f"GoodLocks: {worst[5]['good_locks']} | Hits: {worst[5]['total_hits']} | Conv: {worst[5]['lock_to_hit_conv']:.2f} | HP: {worst[5]['final_hp']}"
+worst_info = f"Locks: {worst[5]['good_locks']} | Hits: {worst[5]['total_hits']} | Conv: {worst[5]['lock_to_hit_conv']:.2f} | HP: {worst[5]['final_hp']}"
 plot_traj_with_hits(worst[0], worst[1], worst[2], worst[3], 
                     f"worst_episode_{worst_idx + 1}", outdir, worst_info)
 animate_traj_follow_zoom(worst[0], worst[1], worst[2], worst[3], 
