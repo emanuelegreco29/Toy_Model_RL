@@ -94,9 +94,18 @@ act_dim = env.action_spaces[agent_names[0]].shape[0]
 print(f"Observation dimension: {obs_dim}")
 print(f"Action dimension: {act_dim}")
 
-# Independent PPO networks and optimizers per-agent
+# --- Shared actor + per-agent critics ---
 nets = {ag: EnhancedActorCritic(obs_dim, act_dim).to(device) for ag in agent_names}
-opts = {ag: Adam(nets[ag].parameters(), lr=learning_rate, eps=1e-5) for ag in agent_names}
+
+# Same actor for both agents
+shared_actor = nets[agent_names[0]].actor
+nets[agent_names[1]].actor = shared_actor
+
+# Single optimizer for shared actor
+actor_opt = Adam(shared_actor.parameters(), lr=learning_rate, eps=1e-5)
+
+# Two optimizers for the separate critics
+crit_opts = {ag: Adam(nets[ag].critic.parameters(), lr=learning_rate, eps=1e-5) for ag in agent_names}
 
 # PFSP
 if PFSP_ENABLED:
@@ -109,8 +118,9 @@ else:
 
 metrics = {ag: _default_metrics() for ag in agent_names}
 
-# Learning rate schedulers
-schedulers = {ag: LambdaLR(opts[ag], lr_lambda=lr_lambda_fn) for ag in agent_names}
+# Separate LearningRate schedulers
+actor_sched = LambdaLR(actor_opt, lr_lambda=lr_lambda_fn)
+crit_sched  = {ag: LambdaLR(crit_opts[ag], lr_lambda=lr_lambda_fn) for ag in agent_names}
 
 # Rollout buffers per-agent
 buf = {}
@@ -280,7 +290,7 @@ for update in range(1, num_updates + 1):
         episode_returns[ag].extend(ep_returns_batch[ag])
         episode_lengths[ag].extend(ep_lens_batch[ag])
         episode_hits[ag].extend(ep_hits_batch[ag])
-
+        
     # ===== GAE & UPDATE =====
     targets = [agent_names[update % 2]] if PFSP_ENABLED else agent_names
 
@@ -300,52 +310,78 @@ for update in range(1, num_updates + 1):
             lastgaelam = delta + gamma * gae_lambda * next_nonterminal * lastgaelam
             buf[ag]["advantages"][t] = lastgaelam
         buf[ag]["returns"] = buf[ag]["advantages"] + buf[ag]["vals"]
-        # normalize
         adv = buf[ag]["advantages"]
         buf[ag]["advantages"] = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    # Update per tutti i lati target
+    # UPDATE (actor condiviso + critic per-agente)
     bsz = steps_per_update
     minibatch_size = bsz // num_minibatches
 
     for ag in targets:
         policy_losses, value_losses, entropy_losses, ratios = [], [], [], []
-        inds = np.arange(bsz)
-        for epoch in range(update_epochs):
-            np.random.shuffle(inds)
-            for start in range(0, bsz, minibatch_size):
-                mb = inds[start:start + minibatch_size]
-                obs_b = buf[ag]["obs"][mb]
-                acts_b = buf[ag]["acts"][mb]
-                logp_old_b = buf[ag]["logp"][mb]
-                adv_b = buf[ag]["advantages"][mb]
-                ret_b = buf[ag]["returns"][mb]
-                val_b = buf[ag]["vals"][mb]
 
+    inds = np.arange(bsz)
+    for epoch in range(update_epochs):
+        np.random.shuffle(inds)
+        for start in range(0, bsz, minibatch_size):
+            mb = inds[start:start + minibatch_size]
+
+            # azzera grad dell'actor condiviso; i critic si azzerano per-agente
+            actor_opt.zero_grad(set_to_none=True)
+            batch_ratios = []
+
+            for ag in targets:
+                obs_b      = buf[ag]["obs"][mb]
+                acts_b     = buf[ag]["acts"][mb]
+                logp_old_b = buf[ag]["logp"][mb]
+                adv_b      = buf[ag]["advantages"][mb]
+                ret_b      = buf[ag]["returns"][mb]
+                val_b      = buf[ag]["vals"][mb]
+
+                # fwd: usa actor condiviso (legato dentro nets[ag]) + critic specifico
                 _, logp, entropy, value = nets[ag].get_action_and_value(obs_b, acts_b)
                 ratio = (logp - logp_old_b).exp()
-                ratios.extend(ratio.detach().cpu().numpy())
+                batch_ratios.append(ratio.detach().cpu().numpy())
 
+                # PPO actor loss
                 pg1 = -adv_b * ratio
                 pg2 = -adv_b * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
                 pg_loss = torch.max(pg1, pg2).mean()
 
+                # value loss (critic per-agente)
                 v_uncl = (value - ret_b) ** 2
                 v_clip = val_b + torch.clamp(value - val_b, -clip_coef, clip_coef)
                 v_loss = 0.5 * torch.max(v_uncl, (v_clip - ret_b) ** 2).mean()
 
-                loss = pg_loss - ent_coef_now * entropy.mean() + vf_coef * v_loss
+                actor_loss  = pg_loss - entropy_coef(update) * entropy.mean()
+                critic_loss = vf_coef * v_loss
 
-                opts[ag].zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(nets[ag].parameters(), max_grad_norm)
-                opts[ag].step()
+                # backward critic (step immediato per-agente)
+                crit_opts[ag].zero_grad(set_to_none=True)
+                critic_loss.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(nets[ag].critic.parameters(), max_grad_norm)
+                crit_opts[ag].step()
+
+                # accumula grad dell'actor condiviso (niente step qui)
+                actor_loss.backward(retain_graph=True)
 
                 policy_losses.append(pg_loss.item())
                 value_losses.append(v_loss.item())
                 entropy_losses.append(float(entropy.mean().item()))
 
-        schedulers[ag].step()
+            # singolo step dell'actor condiviso per questo minibatch
+            torch.nn.utils.clip_grad_norm_(shared_actor.parameters(), max_grad_norm)
+            actor_opt.step()
+            for arr in batch_ratios:
+                ratios.extend(arr)
+
+    # step schedulers
+    actor_sched.step()
+    for ag in targets:
+        crit_sched[ag].step()
+
+    # explained variance / metrics
+    for ag in targets:
         with torch.no_grad():
             v_pred = safecpu(nets[ag].get_value(buf[ag]["obs"]).cpu())
             v_true = safecpu(buf[ag]["returns"].cpu())
@@ -357,10 +393,9 @@ for update in range(1, num_updates + 1):
             "entropy": float(np.mean(entropy_losses)),
             "ratio_mean": float(np.mean(ratios)),
             "ratio_std": float(np.std(ratios)),
-            "lr": schedulers[ag].get_last_lr()[0],
+            "lr": actor_sched.get_last_lr()[0],  # lr dell'actor condiviso
         }
-
-
+        
     # LOGGING AND SAVING
     if update % log_interval == 0:
         # Compute episode statistics
@@ -398,15 +433,17 @@ for update in range(1, num_updates + 1):
             path = os.path.join(save_dir, f"{ag}_policy_upd{update:04d}.pth")
             torch.save({
                 'model_state_dict': nets[ag].state_dict(),
-                'optimizer_state_dict': opts[ag].state_dict(),
-                'scheduler_state_dict': schedulers[ag].state_dict(),
+                'actor_opt_state_dict': actor_opt.state_dict(),
+                'critic_opt_state_dict': crit_opts[ag].state_dict(),
+                'actor_sched_state_dict': actor_sched.state_dict(),
+                'critic_sched_state_dict': crit_sched[ag].state_dict(),
                 'update': update,
                 'global_step': global_step,
                 'metrics': metrics[ag]
             }, path)
             if PFSP_ENABLED:
                 pools[ag].add(nets[ag].state_dict())
-
+                
         # Save training statistics
         stats_path = os.path.join(save_dir, f"training_stats_upd{update:04d}.npz")
         np.savez(stats_path,
@@ -425,13 +462,15 @@ for ag in agent_names:
     final_path = os.path.join(save_dir, f"{ag}_policy_final.pth")
     torch.save({
         'model_state_dict': nets[ag].state_dict(),
-        'optimizer_state_dict': opts[ag].state_dict(),
-        'scheduler_state_dict': schedulers[ag].state_dict(),
+        'actor_opt_state_dict': actor_opt.state_dict(),
+        'critic_opt_state_dict': crit_opts[ag].state_dict(),
+        'actor_sched_state_dict': actor_sched.state_dict(),
+        'critic_sched_state_dict': crit_sched[ag].state_dict(),
         'update': update,
         'global_step': global_step,
         'final': True
     }, final_path)
-
+    
 print(f"Final models saved in {save_dir}")
 
 # Print final statistics
