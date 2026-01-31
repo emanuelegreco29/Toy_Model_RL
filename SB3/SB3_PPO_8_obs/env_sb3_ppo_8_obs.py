@@ -26,7 +26,12 @@ class PointMassEnv(gym.Env):
 
         # stato iniziale e target di default
         self.state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-        self.target = np.array([10.0, 10.0, 5.0], dtype=np.float32)
+        self.target = np.array([10.0, 10.0, 5.0], dtype=np.float32)  # default (verrà sovrascritto a reset)
+
+        self.target_max_init_distance = 25.0   # distanza massima iniziale dal punto di partenza
+        self.target_min_init_distance = 2.0    # opzionale: evita target troppo vicini
+        self.target_xy_bounds = (-30.0, 30.0)  # clamp opzionale per X,Y
+        self.target_z_bounds = (0.0, 10.0)     # clamp opzionale per Z
 
         # per metriche episodio
         self._start_distance = None
@@ -36,6 +41,26 @@ class PointMassEnv(gym.Env):
             np.random.seed(seed)
         self.current_step = 0
         self.state = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+
+        # genera un target casuale entro la distanza massima
+        pos0 = self.state[:3].astype(np.float32)
+
+        for _ in range(1000):
+            v = np.random.normal(size=3).astype(np.float32)
+            n = float(np.linalg.norm(v))
+            if n < 1e-8:
+                continue
+            v /= n
+            r = np.random.uniform(self.target_min_init_distance, self.target_max_init_distance)
+            tgt = pos0 + v * float(r)
+
+            tgt[0] = float(np.clip(tgt[0], self.target_xy_bounds[0], self.target_xy_bounds[1]))
+            tgt[1] = float(np.clip(tgt[1], self.target_xy_bounds[0], self.target_xy_bounds[1]))
+            tgt[2] = float(np.clip(tgt[2], self.target_z_bounds[0], self.target_z_bounds[1]))
+
+            if float(np.linalg.norm(tgt - pos0)) <= self.target_max_init_distance + 1e-6:
+                self.target = tgt.astype(np.float32)
+                break
 
         self._start_distance = float(np.linalg.norm(self.state[:3] - self.target))
         return self._get_obs(), {}
