@@ -127,6 +127,19 @@ class PointMassEnv(gym.Env):
             yaw, pitch
         ], dtype=np.float32)
         
+        # Episode accumulators for logging (per-step sums)
+        self._ep_steps = 0
+        self._sum_f_dist = 0.0
+        self._sum_f_head_pos = 0.0
+        self._sum_f_head_vel = 0.0
+        self._sum_w_dist = 0.0
+        self._sum_w_head_pos = 0.0
+        self._sum_w_head_vel = 0.0
+        self._sum_bias = 0.0
+        self._sum_total_reward = 0.0
+        self._start_distance = float(np.linalg.norm(self.state[:3] - self.target_state[:3]))
+        self._last_distance = float(self._start_distance)
+        
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -211,26 +224,44 @@ class PointMassEnv(gym.Env):
         yaw, pitch = self.state[4:6]
         target_pos = self.target_state
         target_dir = self._get_target_direction()
-        
+
         vec = agent_pos - target_pos
-        d3 = np.linalg.norm(vec) + 1e-8
-        f_dist = np.exp(-0.5 * (d3/10) ** 1)
+        dist = float(np.linalg.norm(vec))
+        d3 = dist + 1e-8
 
-        ux, uy, uz = vec / d3
-        position_vec = np.array([ux, uy, uz])
-        
-        dx = np.cos(pitch) * np.cos(yaw)
-        dy = np.cos(pitch) * np.sin(yaw)
-        dz = np.sin(pitch)
-        direction_vec = np.array([dx, dy, dz])
-        
-        cos_vel = np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0)
-        cos_pos = np.clip(np.dot(position_vec, target_dir), -1.0, 1.0)
-        
-        f_head_pos = (1 - cos_pos) / 2
-        f_head_vel = (1 + cos_vel) / 2
+        f_dist = float(np.exp(-0.5 * (d3 / 10.0) ** 1))
+        position_vec = vec / d3
 
-        return (f_dist * 0.5 + f_head_pos * 0.3 + f_head_vel * 0.2) - 1.0
+        dx = float(np.cos(pitch) * np.cos(yaw))
+        dy = float(np.cos(pitch) * np.sin(yaw))
+        dz = float(np.sin(pitch))
+        direction_vec = np.array([dx, dy, dz], dtype=float)
+
+        cos_vel = float(np.clip(np.dot(direction_vec, target_dir), -1.0, 1.0))
+        cos_pos = float(np.clip(np.dot(position_vec, target_dir), -1.0, 1.0))
+
+        f_head_pos = float((1.0 - cos_pos) / 2.0)
+        f_head_vel = float((1.0 + cos_vel) / 2.0)
+
+        w_dist = 0.5 * f_dist
+        w_head_pos = 0.3 * f_head_pos
+        w_head_vel = 0.2 * f_head_vel
+        bias = -1.0
+
+        reward = float(w_dist + w_head_pos + w_head_vel + bias)
+
+        components = {
+            "f_dist": float(f_dist),
+            "f_head_pos": float(f_head_pos),
+            "f_head_vel": float(f_head_vel),
+            "w_dist": float(w_dist),
+            "w_head_pos": float(w_head_pos),
+            "w_head_vel": float(w_head_vel),
+            "bias": float(bias),
+            "total_reward": float(reward),
+            "distance": float(dist),
+        }
+        return float(reward), components
 
     def step(self, action):
         # Avanza target
@@ -252,7 +283,21 @@ class PointMassEnv(gym.Env):
         self.state = np.array([x, y, z, v, yaw, pitch], dtype=np.float32)
 
         self.current_step += 1
-        reward = self.compute_reward()
+        reward, comps = self.compute_reward()
+        dist = float(comps["distance"])
+
+        # Episode accumulators for logging
+        self._ep_steps += 1
+        self._sum_f_dist += float(comps["f_dist"])
+        self._sum_f_head_pos += float(comps["f_head_pos"])
+        self._sum_f_head_vel += float(comps["f_head_vel"])
+        self._sum_w_dist += float(comps["w_dist"])
+        self._sum_w_head_pos += float(comps["w_head_pos"])
+        self._sum_w_head_vel += float(comps["w_head_vel"])
+        self._sum_bias += float(comps["bias"])
+        self._sum_total_reward += float(comps["total_reward"])
+        self._last_distance = float(dist)
+
 
         # Tracking
         if self._is_behind():
@@ -264,8 +309,24 @@ class PointMassEnv(gym.Env):
         # Terminazione e info
         dist = np.linalg.norm(self.state[:3] - self.target_state[:3])
         truncated = bool(self.current_step >= self.max_steps)
-        info = {"distance": float(dist), "followed": int(self.totally_behind)}
-        return self._get_obs(), reward, False, truncated, info
+
+        denom = float(self._ep_steps) if self._ep_steps > 0 else 1.0
+        info = {
+            "distance": float(dist),
+            "followed": int(self.totally_behind),
+            "totally_behind": int(self.totally_behind),
+            "reward_components": {
+                "f_dist": float(self._sum_f_dist / denom),
+                "f_head_pos": float(self._sum_f_head_pos / denom),
+                "f_head_vel": float(self._sum_f_head_vel / denom),
+                "w_dist": float(self._sum_w_dist / denom),
+                "w_head_pos": float(self._sum_w_head_pos / denom),
+                "w_head_vel": float(self._sum_w_head_vel / denom),
+                "bias": float(self._sum_bias / denom),
+                "total_reward": float(self._sum_total_reward / denom),
+            },
+        }
+        return self._get_obs(), float(reward), False, truncated, info
 
     def render(self, mode='human'):
         print("Agent:", self.state[:3], "Target:", self.target_state[:3])
