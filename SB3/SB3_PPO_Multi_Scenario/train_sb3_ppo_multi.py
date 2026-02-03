@@ -13,12 +13,12 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from env_sb3_ppo_multi import PointMassEnv
 
-ALGO = "TD3"  # "SAC"  # "TD3"
+ALGO = "SAC"  # "SAC"  # "TD3"
 
 TOTAL_TIMESTEPS = 500 * 2000
 SMOOTH_WINDOW = 25
 K_HISTORY = 1
-DEVICE = "cpu"
+DEVICE = "cuda"
 
 
 def moving_average(x: np.ndarray, window: int) -> np.ndarray:
@@ -220,6 +220,8 @@ else:
     raise ValueError(f"Unknown ALGO={ALGO}")
 
 callback = EpisodeLogger()
+print(f"Starting training for: {ALGO}")
+print("Using device:", model.device)
 model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callback)
 
 ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

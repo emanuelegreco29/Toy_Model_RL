@@ -4,20 +4,41 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, PillowWriter
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC, TD3
 import datetime
 import torch
 
 from env_sb3_ppo_multi import PointMassEnv
 
 
-def load_latest_model(model_dir='models', prefix='ppo_sb3_multi_', ext='.zip'):
-    files = glob.glob(os.path.join(model_dir, f"{prefix}*{ext}"))
-    if not files:
-        raise FileNotFoundError(f"No model files matching {prefix}*{ext}")
-    latest = max(files, key=os.path.getmtime)
-    print(f"Loading model: {latest}")
-    return PPO.load(latest, device='cpu')
+def load_latest_model(model_root='models', algo='PPO', device='cpu'):
+    algo = algo.upper()
+    algo_l = algo.lower()
+
+    # 1) preferisci la struttura creata dal train: models/{algo}_sb3_multi_YYYY.../{algo}_model.zip
+    run_dirs = glob.glob(os.path.join(model_root, f"{algo_l}_sb3_multi_*"))
+    run_dirs = [d for d in run_dirs if os.path.isdir(d)]
+    if run_dirs:
+        latest_dir = max(run_dirs, key=os.path.getmtime)
+        cand = os.path.join(latest_dir, f"{algo_l}_model.zip")
+        if os.path.exists(cand):
+            model_path = cand
+        else:
+            model_path = None
+    else:
+        model_path = None
+
+    # 2) fallback: cerca ricorsivamente qualsiasi .../{algo}_model.zip
+    if model_path is None:
+        files = glob.glob(os.path.join(model_root, "**", f"{algo_l}_model.zip"), recursive=True)
+        if not files:
+            raise FileNotFoundError(f"No {algo_l}_model.zip found under {model_root}/")
+        model_path = max(files, key=os.path.getmtime)
+
+    print(f"Loading {algo} model: {model_path}")
+
+    cls = {"PPO": PPO, "SAC": SAC, "TD3": TD3}[algo]
+    return cls.load(model_path, device=device)
 
 
 def evaluate_model(model, num_episodes=10):
@@ -56,7 +77,7 @@ def evaluate_model(model, num_episodes=10):
                 target_path.append(env.target_state[:3].copy())
                 rewards.append(ep_reward)
                 distances.append(info.get('distance', np.nan))
-                followed.append(info.get('followed', np.nan))
+                followed.append(info.get('totally_behind', info.get('followed', np.nan)))
                 break
 
         trajectories.append(np.array(agent_path))
@@ -111,6 +132,61 @@ def plot_velocities(agent_traj, target_traj, title_prefix='Episode', save_dir='p
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f'{title_prefix}_speed.png'))
     plt.close()
+    
+def plot_full_trajectory_3d(
+    agent_traj,
+    target_traj,
+    filename="trajectory_overall.png",
+    title="Trajectory (overall view)",
+    save_dir="plots",
+    pad=1.0,
+    elev=20,
+    azim=-60,
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    agent_traj = np.asarray(agent_traj, dtype=float)
+    target_traj = np.asarray(target_traj, dtype=float)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Trajectories
+    ax.plot(agent_traj[:, 0], agent_traj[:, 1], agent_traj[:, 2], lw=2, color="blue", label="Agent trajectory")
+    ax.plot(target_traj[:, 0], target_traj[:, 1], target_traj[:, 2], lw=2, color="orange", label="Target trajectory")
+
+    # Start / End markers
+    ax.scatter(agent_traj[0, 0], agent_traj[0, 1], agent_traj[0, 2], s=50, color="blue", marker="o", label="Agent start")
+    ax.scatter(agent_traj[-1, 0], agent_traj[-1, 1], agent_traj[-1, 2], s=80, color="blue", marker="X", label="Agent end")
+
+    ax.scatter(target_traj[0, 0], target_traj[0, 1], target_traj[0, 2], s=50, color="orange", marker="o", label="Target start")
+    ax.scatter(target_traj[-1, 0], target_traj[-1, 1], target_traj[-1, 2], s=80, color="orange", marker="X", label="Target end")
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title(title)
+
+    # Overall centered view (bounds from whole episode, equalized box)
+    pts = np.vstack([agent_traj, target_traj])
+    mins = pts.min(axis=0) - pad
+    maxs = pts.max(axis=0) + pad
+    center = (mins + maxs) / 2.0
+    span = (maxs - mins)
+    max_range = float(np.max(span)) if span.size else 1.0
+
+    ax.set_xlim(center[0] - max_range / 2.0, center[0] + max_range / 2.0)
+    ax.set_ylim(center[1] - max_range / 2.0, center[1] + max_range / 2.0)
+    ax.set_zlim(center[2] - max_range / 2.0, center[2] + max_range / 2.0)
+
+    # Camera
+    ax.view_init(elev=elev, azim=azim)
+
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, filename), dpi=200)
+    plt.close(fig)
+
 
 def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_dir='plots', pad=1.0):
     fig = plt.figure()
@@ -146,13 +222,16 @@ def animate_trajectory(agent_traj, target_traj, filename='trajectory.gif', save_
     ani.save(filepath, writer=PillowWriter(fps=5))
     plt.close()
 
+ALGO = "PPO"  # "PPO" | "SAC" | "TD3"
+DEVICE = "auto"
 
-model = load_latest_model()
+model = load_latest_model(algo=ALGO, device=DEVICE)
 print("Model loaded successfully.")
-log_std = model.policy.log_std.detach().cpu().numpy()
-std = torch.exp(model.policy.log_std).detach().cpu().numpy()
-print("Log-std per dimensione d’azione:", log_std)
-print("Std per dimensione d’azione:   ", std)
+if ALGO == "PPO":
+    log_std = model.policy.log_std.detach().cpu().numpy()
+    std = torch.exp(model.policy.log_std).detach().cpu().numpy()
+    print("Log-std per dimensione d’azione:", log_std)
+    print("Std per dimensione d’azione:   ", std)
 timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M')
 save_dir = os.path.join('plots', f"sb3_multi_eval_{timestamp}")
 os.makedirs(save_dir, exist_ok=True)
@@ -161,7 +240,27 @@ num_ep = 100
 print(f"Evaluating model for {num_ep} episodes...")
 trajectories, target_trajs, rewards, distances, followed, action_logs = evaluate_model(model, num_ep)
 
-print(f"Average reward: {np.mean(rewards):.2f} | Average following steps: {np.mean(followed):.2f}")
+rewards_arr = np.asarray(rewards, dtype=float)
+dist_arr = np.asarray(distances, dtype=float)
+behind_arr = np.asarray(followed, dtype=float)  # qui è totally_behind
+
+def mean_std(x: np.ndarray):
+    x = x[~np.isnan(x)]
+    if x.size == 0:
+        return float("nan"), float("nan")
+    if x.size == 1:
+        return float(np.mean(x)), 0.0
+    return float(np.mean(x)), float(np.std(x, ddof=1))
+
+m_rew, s_rew = mean_std(rewards_arr)
+m_dist, s_dist = mean_std(dist_arr)
+m_b, s_b = mean_std(behind_arr)
+
+print(
+    f"Avg Reward: {m_rew:.2f} ± {s_rew:.2f} | "
+    f"Final Distance: {m_dist:.3f} ± {s_dist:.3f} | "
+    f"Totally Behind: {m_b:.2f} ± {s_b:.2f}"
+)
 
 best_idx = int(np.argmax(rewards))
 worst_idx = int(np.argmin(rewards))
@@ -189,6 +288,24 @@ plot_coordinates(trajectories[worst_idx], target_trajs[worst_idx], title_prefix=
 print("Plotting speed time-series...")
 plot_velocities(trajectories[best_idx], target_trajs[best_idx], title_prefix='Best_Episode', save_dir=save_dir)
 plot_velocities(trajectories[worst_idx], target_trajs[worst_idx], title_prefix='Worst_Episode', save_dir=save_dir)
+
+print("Plotting 3D overall trajectories (PNG)...")
+plot_full_trajectory_3d(
+    trajectories[best_idx],
+    target_trajs[best_idx],
+    filename="best_episode_overall.png",
+    title="Best Episode - Overall 3D Trajectory",
+    save_dir=save_dir,
+    pad=1.0,
+)
+plot_full_trajectory_3d(
+    trajectories[worst_idx],
+    target_trajs[worst_idx],
+    filename="worst_episode_overall.png",
+    title="Worst Episode - Overall 3D Trajectory",
+    save_dir=save_dir,
+    pad=1.0,
+)
 
 print("Creating animations...")
 animate_trajectory(trajectories[best_idx], target_trajs[best_idx], filename='best_episode.gif', save_dir=save_dir)
