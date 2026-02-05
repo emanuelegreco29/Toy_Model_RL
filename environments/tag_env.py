@@ -52,6 +52,7 @@ class TagEnv(ParallelEnv):
         self.action_spaces = {a: spaces.Box(act_low, act_high, dtype=np.float32) for a in self.agents}
         self.prev_act = {ag: np.zeros(self.action_spaces[ag].shape, dtype=np.float32)
                     for ag in self.agents}
+        self.last_reward_components = {ag: {} for ag in self.agents}
 
 
     def reset(self, seed=None, options=None):
@@ -122,6 +123,7 @@ class TagEnv(ParallelEnv):
         obs = {agent: self._get_obs(agent) for agent in self.agents}
         global_state = np.concatenate([obs[a] for a in self.agents], axis=0)
         infos = {agent: {'global_state': global_state.copy()} for agent in self.agents}
+        self.last_reward_components = {ag: {} for ag in self.agents}
 
         return obs, infos
 
@@ -199,8 +201,9 @@ class TagEnv(ParallelEnv):
             rewards[ag] = self._compute_reward(ag)
 
             infos[ag] = {
-                'distance': float(np.linalg.norm(self.states[ag][:3] - self.states[self._other(ag)][:3])),
-                'followed': int(self.total_behind[ag]),
+                "distance": float(np.linalg.norm(self.states[ag][:3] - self.states[self._other(ag)][:3])),
+                "followed": int(self.total_behind[ag]),
+                "reward_components": dict(self.last_reward_components.get(ag, {})),
             }
         
         term = (self.current_step >= self.max_steps)
@@ -260,16 +263,46 @@ class TagEnv(ParallelEnv):
         
         # Shaping the reward based on previous distance
         if self.total_behind[agent] > self.total_behind[self._other(agent)]:
-            # agent è stato dietro quindi è svantaggiato
-            delta = d_curr - d_prev
+            k = 0.6
         else:
-            # agent è stato davanti quindi è avvantaggiato
-            delta = d_prev - d_curr
-            
-        k = 0.1
+            k = 0.4
+
+        if d_prev is None:
+            d_prev = d_curr
+        delta = (d_prev - d_curr) / 15.0
+
         self.prev_dist[agent] = d_curr
 
-        return base_reward - w_align * penalty_align + k * delta
+        w_dist = 0.5 * f_dist
+        w_head_pos = 0.3 * f_head_pos
+        w_head_vel = 0.2 * f_head_vel
+        bias = -1.0
+        w_align_term = -w_align * penalty_align
+        w_delta = k * delta
+
+        total_reward = (w_dist + w_head_pos + w_head_vel + bias) + w_align_term + w_delta
+
+        self.last_reward_components[agent] = {
+            # raw
+            "f_dist": float(f_dist),
+            "f_head_pos": float(f_head_pos),
+            "f_head_vel": float(f_head_vel),
+            "penalty_align": float(penalty_align),
+            "delta": float(delta),
+            "k": float(k),
+            "bias": float(bias),
+            # weighted
+            "w_dist": float(w_dist),
+            "w_head_pos": float(w_head_pos),
+            "w_head_vel": float(w_head_vel),
+            "w_align": float(w_align_term),
+            "w_delta": float(w_delta),
+            # totals
+            "base_reward": float(base_reward),
+            "total_reward": float(total_reward),
+        }
+
+        return total_reward
 
     def _is_behind(self, agent):
         agent_pos = self.states[agent][:3]

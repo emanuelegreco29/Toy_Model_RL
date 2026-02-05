@@ -3,17 +3,25 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
+import csv
 import numpy as np
 import datetime
 from collections import deque
+from pathlib import Path
 import torch.optim as optim
 
 from environments.tag_env import TagEnv
 from algorithms.PPO.custom_ppo import CustomActorCritic
 from algorithms.utilities.centralized_critic import CentralizedCritic
 
-ts = datetime.datetime.now().strftime('%Y%m%d-%H%M')
-os.makedirs(f"policies/Tag_SP/Tag_SelfPlay_{ts}", exist_ok=True)
+ts = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+run_dir = Path(f"policies/Tag_SP/Tag_SelfPlay_{ts}")
+run_dir.mkdir(parents=True, exist_ok=True)
+
+csv_dir = run_dir / "csv"
+csv_dir.mkdir(parents=True, exist_ok=True)
+
+csv_path = csv_dir / "train_metrics.csv"
 
 # --- Hyperparameters ---
 gamma, lam           = 0.99, 0.95
@@ -53,6 +61,9 @@ for ep in range(1, total_epochs+1):
     buf = {ag: {'obs':[], 'acts':[], 'vals':[], 'logp_old':[], 'rews':[], 'dones':[]} 
            for ag in env.agents}
     batch_global = []
+    comp_sums = {ag: {} for ag in env.agents}
+    comp_counts = {ag: 0 for ag in env.agents}
+    loss_log = {ag: {} for ag in env.agents}
 
     obs_dict, infos = env.reset()
     g0 = infos[env.agents[0]]['global_state']
@@ -76,6 +87,15 @@ for ep in range(1, total_epochs+1):
 
         # Step env
         next_obs, rews, dones, infos = env.step(actions)
+        for ag in env.agents:
+            rc = infos[ag].get("reward_components", {}) or {}
+            for k, v in rc.items():
+                try:
+                    comp_sums[ag][k] = comp_sums[ag].get(k, 0.0) + float(v)
+                except Exception:
+                    pass
+            comp_counts[ag] += 1
+        
         g1 = infos[env.agents[0]]['global_state']
         batch_global.append(torch.tensor(g1, dtype=torch.float32))
 
@@ -131,6 +151,12 @@ for ep in range(1, total_epochs+1):
         entropy_loss = -dist.entropy().sum(-1).mean()
         smooth_loss = smoothing_coeff * (act_diff**2).sum(dim=-1).mean()
         loss = policy_loss + entropy_coef * entropy_loss + smooth_loss
+        loss_log[ag] = {
+            "policy_loss": float(policy_loss.item()),
+            "entropy_loss": float(entropy_loss.item()),
+            "smooth_loss": float(smooth_loss.item()),
+            "total_loss": float(loss.item()),
+        }
 
         opts[ag].zero_grad()
         loss.backward()
@@ -140,13 +166,74 @@ for ep in range(1, total_epochs+1):
     dist   = infos[a0]['distance']
     fb0    = infos[a0]['followed']
     fb1    = infos[a1]['followed']
+
+    ep_ret_a0 = float(torch.stack(buf[a0]["rews"]).sum().item())
+    ep_ret_a1 = float(torch.stack(buf[a1]["rews"]).sum().item())
+    ep_ret_mean = 0.5 * (ep_ret_a0 + ep_ret_a1)
+
+    final_distance = float(infos[a0].get("distance", np.nan))
+    followed_a0 = int(infos[a0].get("followed", 0))
+    followed_a1 = int(infos[a1].get("followed", 0))
+
+    comp_means = {}
+    for ag in env.agents:
+        comp_means[ag] = {}
+        denom = max(1, comp_counts[ag])
+        for k, s in comp_sums[ag].items():
+            comp_means[ag][k] = float(s) / float(denom)
+
+    row = {
+        "epoch": int(ep),
+        "steps_collected": int(batch_size),
+        "ep_return_agent0": ep_ret_a0,
+        "ep_return_agent1": ep_ret_a1,
+        "ep_return_mean": ep_ret_mean,
+        "final_distance": final_distance,
+        "followed_agent0": followed_a0,
+        "followed_agent1": followed_a1,
+        "critic_loss": float(critic_loss.item()),
+        "actor0_policy_loss": float(loss_log[a0].get("policy_loss", np.nan)),
+        "actor0_entropy_loss": float(loss_log[a0].get("entropy_loss", np.nan)),
+        "actor0_smooth_loss": float(loss_log[a0].get("smooth_loss", np.nan)),
+        "actor0_total_loss": float(loss_log[a0].get("total_loss", np.nan)),
+        "actor1_policy_loss": float(loss_log[a1].get("policy_loss", np.nan)),
+        "actor1_entropy_loss": float(loss_log[a1].get("entropy_loss", np.nan)),
+        "actor1_smooth_loss": float(loss_log[a1].get("smooth_loss", np.nan)),
+        "actor1_total_loss": float(loss_log[a1].get("total_loss", np.nan)),
+    }
+
+    def _put_comp(prefix: str, comp_dict: dict):
+        for k, v in comp_dict.items():
+            row[f"{prefix}{k}"] = float(v)
+
+    _put_comp("a0_", comp_means.get(a0, {}))
+    _put_comp("a1_", comp_means.get(a1, {}))
+
+    # header dinamico: tutte le chiavi viste finora
+    header = list(row.keys())
+    if csv_path.exists():
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            existing = next(reader, None)
+        if existing:
+            header = existing
+            for k in row.keys():
+                if k not in header:
+                    header.append(k)
+
+    write_header = (not csv_path.exists()) or (csv_path.stat().st_size == 0)
+
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, np.nan) for k in header})
+
     print(f"[Episode {ep}] Distance {dist:.3f} | Behind {a0}: {fb0}, {a1}: {fb1}")
     
     if ep % save_interval == 0:
         for ag in env.agents:
-            torch.save(agents[ag].state_dict(),
-                    f"policies/Tag_SP/Tag_SelfPlay_{ts}/{ag}_policy_ep{ep}.pth")
-        torch.save(critic.state_dict(),
-                f"policies/Tag_SP/Tag_SelfPlay_{ts}/critic_ep{ep}.pth")
-        print(f"→ Modelli salvati a epoca {ep}")
+            torch.save(agents[ag].state_dict(), str(run_dir / f"{ag}_policy_ep{ep}.pth"))
+        torch.save(critic.state_dict(), str(run_dir / f"critic_ep{ep}.pth"))
 
+        print(f"→ Modelli salvati a epoca {ep}")
